@@ -21,6 +21,10 @@ pub enum OpsKind {
     Move,
     Rename,
     Delete,
+    /// A Clean tab scan (junk walk, duplicate hashing).
+    Scan,
+    /// Moving Clean tab selections to the Recycle Bin.
+    Clean,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]

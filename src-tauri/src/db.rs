@@ -41,6 +41,13 @@ pub struct IndexedEntry {
     pub drive: String,
 }
 
+/// A screenshot candidate plus whether it came from the Screenshots folder itself.
+#[derive(Clone, Debug)]
+pub struct ScreenshotRow {
+    pub entry: IndexedEntry,
+    pub inside_folder: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CategorySummary {
@@ -124,6 +131,7 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_files_parent_name ON files(parent_path, name COLLATE NOCASE);
              CREATE INDEX IF NOT EXISTS idx_files_category_size ON files(category, size);
              CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
+             CREATE INDEX IF NOT EXISTS idx_files_size ON files(is_directory, size);
              CREATE INDEX IF NOT EXISTS idx_files_drive ON files(drive);
              CREATE TABLE IF NOT EXISTS favorites (
                  id INTEGER PRIMARY KEY,
@@ -178,8 +186,7 @@ impl Database {
 
     pub fn remove_path(&self, path: &Path) -> Result<(), AppError> {
         let path = display_path(path);
-        let separator = if cfg!(windows) { '\\' } else { '/' };
-        let child_prefix = if path.ends_with('\\') || path.ends_with('/') { path.clone() } else { format!("{path}{separator}") };
+        let child_prefix = descendant_prefix(&path);
         self.lock()?.execute(
             "DELETE FROM files WHERE path = ?1 OR substr(path, 1, length(?2)) = ?2",
             params![path, child_prefix],
@@ -382,6 +389,127 @@ impl Database {
         Ok(())
     }
 
+    /// Everything at least `min_size` bytes, largest first. Directories are excluded.
+    pub fn large_files(&self, min_size: u64, limit: u32) -> Result<Vec<IndexedEntry>, AppError> {
+        let min_size = min_size.min(i64::MAX as u64) as i64;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, parent_path, name, ext, category, size, mtime, ctime, is_hidden, is_cloud, is_directory, drive \
+             FROM files WHERE is_directory = 0 AND size >= ?1 \
+             ORDER BY size DESC, name COLLATE NOCASE ASC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![min_size, limit], map_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// How many files and how many bytes sit above `min_size`, ignoring the list cap.
+    pub fn large_file_totals(&self, min_size: u64) -> Result<(u64, u64), AppError> {
+        let min_size = min_size.min(i64::MAX as u64) as i64;
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE is_directory = 0 AND size >= ?1",
+                params![min_size],
+                |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get::<_, i64>(1)?.max(0) as u64)),
+            )
+            .map_err(AppError::from)
+    }
+
+    /// The same totals for one folder tree, without the row cap.
+    pub fn older_than_under_totals(&self, parent: &Path, cutoff_unix: i64) -> Result<(u64, u64), AppError> {
+        let prefix = descendant_prefix(&display_path(parent));
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE is_directory = 0 \
+                 AND substr(path, 1, length(?1)) = ?1 AND mtime IS NOT NULL AND mtime < ?2",
+                params![prefix, cutoff_unix],
+                |row| Ok((row.get::<_, i64>(0)?.max(0) as u64, row.get::<_, i64>(1)?.max(0) as u64)),
+            )
+            .map_err(AppError::from)
+    }
+
+    /// Non-directory entries anywhere under `parent` whose modification time is older
+    /// than `cutoff_unix`, oldest first. Entries with no recorded time are ignored.
+    pub fn files_older_than_under(
+        &self,
+        parent: &Path,
+        cutoff_unix: i64,
+        limit: u32,
+    ) -> Result<Vec<IndexedEntry>, AppError> {
+        let prefix = descendant_prefix(&display_path(parent));
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, parent_path, name, ext, category, size, mtime, ctime, is_hidden, is_cloud, is_directory, drive \
+             FROM files WHERE is_directory = 0 AND substr(path, 1, length(?1)) = ?1 \
+               AND mtime IS NOT NULL AND mtime < ?2 \
+             ORDER BY mtime ASC, size DESC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![prefix, cutoff_unix, limit], map_entry)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// Files that look like captures. The name patterns here are deliberately broader
+    /// than `clean::rules::is_screenshot_name`, which has the final say on every row;
+    /// `inside_folder` tells that rule whether the row came from the Screenshots folder.
+    pub fn screenshot_candidates(
+        &self,
+        folder_prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<ScreenshotRow>, AppError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, path, parent_path, name, ext, category, size, mtime, ctime, is_hidden, is_cloud, is_directory, drive, \
+                    substr(path, 1, length(?1)) = ?1 \
+             FROM files WHERE is_directory = 0 \
+               AND (substr(path, 1, length(?1)) = ?1 \
+                    OR lower(name) LIKE '%screenshot%' OR lower(name) LIKE '%screen shot%' \
+                    OR lower(name) LIKE '%screen-shot%' OR lower(name) LIKE '%screen_shot%' \
+                    OR lower(name) LIKE '%snipping%' OR lower(name) LIKE '%snip %' \
+                    OR lower(name) LIKE '%capture%') \
+             ORDER BY size DESC, mtime ASC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![folder_prefix, limit], |row| {
+            Ok(ScreenshotRow { entry: map_entry(row)?, inside_folder: row.get::<_, i64>(13)? != 0 })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// Sizes that more than one non-cloud file shares, biggest total first. These are
+    /// the only sizes worth hashing.
+    pub fn duplicate_size_groups(&self, min_size: u64, limit: u32) -> Result<Vec<u64>, AppError> {
+        let min_size = min_size.min(i64::MAX as u64) as i64;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT size FROM files WHERE is_directory = 0 AND is_cloud = 0 AND size >= ?1 \
+             GROUP BY size HAVING COUNT(*) > 1 ORDER BY size * COUNT(*) DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![min_size, limit], |row| {
+            Ok(row.get::<_, i64>(0)?.max(0) as u64)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// The members of those size groups — the input to the duplicate hash pipeline.
+    pub fn duplicate_candidates(&self, sizes: &[u64]) -> Result<Vec<IndexedEntry>, AppError> {
+        if sizes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = sizes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, path, parent_path, name, ext, category, size, mtime, ctime, is_hidden, is_cloud, is_directory, drive \
+             FROM files WHERE is_directory = 0 AND is_cloud = 0 AND size IN ({placeholders}) \
+             ORDER BY size DESC, path ASC"
+        );
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(sizes.iter().map(|size| size.min(i64::MAX as u64) as i64)),
+            map_entry,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
     pub fn path_entry(&self, path: &str) -> Result<Option<IndexedEntry>, AppError> {
         let connection = self.lock()?;
         connection
@@ -421,6 +549,17 @@ fn insert_records(transaction: &Transaction<'_>, records: &[FileRecord]) -> Resu
         ])?;
     }
     Ok(())
+}
+
+/// `C:\Users\me\Downloads` → `C:\Users\me\Downloads\` so a prefix match cannot
+/// pick up a sibling like `Downloads 2`.
+fn descendant_prefix(path: &str) -> String {
+    let separator = if cfg!(windows) { '\\' } else { '/' };
+    if path.ends_with('\\') || path.ends_with('/') {
+        path.to_owned()
+    } else {
+        format!("{path}{separator}")
+    }
 }
 
 fn map_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedEntry> {

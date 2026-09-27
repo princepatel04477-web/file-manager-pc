@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 #[serde(rename_all = "camelCase")]
 pub struct DeleteResult {
     pub moved: u64,
+    /// Logical size of everything that reached the Recycle Bin.
+    pub moved_bytes: u64,
     pub skipped: u64,
     pub cancelled: bool,
     pub errors: Vec<String>,
@@ -50,11 +52,17 @@ pub fn delete_paths(paths: &[PathBuf], context: &DeleteContext<'_>, emit: &mut d
             }
             continue;
         }
+        // Read the size first: once the item is in the Recycle Bin the path is gone.
+        // Folders report their own entry size, so this is the size of the files moved.
+        let bytes = std::fs::symlink_metadata(ops::io_path(path))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         // `trash` hands the item to the Windows Recycle Bin; nothing is shredded.
         match trash::delete(ops::io_path(path)) {
             Ok(()) => {
                 result.moved += 1;
-                if let Some(progress) = context.registry.finish_item(context.job_id, 0) {
+                result.moved_bytes = result.moved_bytes.saturating_add(bytes);
+                if let Some(progress) = context.registry.finish_item(context.job_id, bytes) {
                     emit(progress);
                 }
             }

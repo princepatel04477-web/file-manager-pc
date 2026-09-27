@@ -9,6 +9,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "tauri": "tauri",
     "test": "vitest run",
+    "check:bindings": "python3 scripts/check-bindings.py",
+    "check:sql": "python3 scripts/check-sql.py",
     "test:watch": "vitest"
   },
   "dependencies": {

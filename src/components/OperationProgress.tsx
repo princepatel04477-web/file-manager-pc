@@ -1,4 +1,4 @@
-import { Ban, Check, Copy, FolderInput, Scissors, Trash2, XCircle } from 'lucide-react';
+import { Ban, Check, Copy, FolderInput, ScanSearch, Scissors, Sparkles, Trash2, XCircle } from 'lucide-react';
 import type { OperationProgress, OpsKind } from '../lib/bindings';
 import { readableSize } from './FileList';
 
@@ -12,6 +12,8 @@ const kindCopy: Record<OpsKind, { label: string; icon: typeof Copy }> = {
   move: { label: 'Moving', icon: FolderInput },
   rename: { label: 'Renaming', icon: Scissors },
   delete: { label: 'Moving to Recycle Bin', icon: Trash2 },
+  scan: { label: 'Scanning', icon: ScanSearch },
+  clean: { label: 'Cleaning up', icon: Sparkles },
 };
 
 function percent(operation: OperationProgress): number {

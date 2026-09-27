@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { commands, type CleanReport, type DirectoryListing, type HomeLocation, type SearchResults } from '../lib/bindings';
+import { commands, type DirectoryListing, type HomeLocation, type SearchResults } from '../lib/bindings';
 
 function messageFrom(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -21,19 +21,16 @@ export interface SelectionOptions {
 interface AppState {
   locations: HomeLocation[];
   listing: DirectoryListing | null;
-  cleanReport: CleanReport | null;
   searchResults: SearchResults | null;
   selectedPaths: string[];
   anchorPath: string | null;
   currentPath: string | null;
   loading: boolean;
-  scanning: boolean;
   searching: boolean;
   error: string | null;
   notice: string | null;
   initialize: () => Promise<void>;
   openDirectory: (path: string) => Promise<void>;
-  runScan: () => Promise<void>;
   runSearch: (query: string) => Promise<void>;
   toggleSelected: (path: string, options?: SelectionOptions) => void;
   setSelectedPaths: (paths: string[]) => void;
@@ -46,13 +43,11 @@ interface AppState {
 export const useAppStore = create<AppState>((set, get) => ({
   locations: [],
   listing: null,
-  cleanReport: null,
   searchResults: null,
   selectedPaths: [],
   anchorPath: null,
   currentPath: null,
   loading: false,
-  scanning: false,
   searching: false,
   error: null,
   notice: null,
@@ -78,17 +73,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ listing: null, error: messageFrom(error) });
     } finally {
       set({ loading: false });
-    }
-  },
-  runScan: async () => {
-    set({ scanning: true, error: null });
-    try {
-      const cleanReport = await commands.scanStorage();
-      set({ cleanReport });
-    } catch (error: unknown) {
-      set({ error: messageFrom(error) });
-    } finally {
-      set({ scanning: false });
     }
   },
   runSearch: async (query) => {

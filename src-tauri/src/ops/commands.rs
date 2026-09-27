@@ -17,12 +17,17 @@ use tauri::{AppHandle, Emitter, State};
 /// Managed state: the live job table behind the progress card and Cancel button.
 #[derive(Default)]
 pub struct FileOpsState {
-    registry: OpsRegistry,
+    registry: std::sync::Arc<OpsRegistry>,
 }
 
 impl FileOpsState {
     pub fn registry(&self) -> &OpsRegistry {
         &self.registry
+    }
+
+    /// Owned handle for work that runs on a blocking task.
+    pub fn registry_arc(&self) -> std::sync::Arc<OpsRegistry> {
+        self.registry.clone()
     }
 }
 
@@ -35,18 +40,18 @@ pub struct RenameOutcome {
 }
 
 /// Throttles progress events so a large copy does not flood the webview.
-struct ProgressEmitter<'a> {
+pub(crate) struct ProgressEmitter<'a> {
     app: &'a AppHandle,
     last: Option<Instant>,
     minimum: Duration,
 }
 
 impl<'a> ProgressEmitter<'a> {
-    fn new(app: &'a AppHandle) -> Self {
+    pub(crate) fn new(app: &'a AppHandle) -> Self {
         Self { app, last: None, minimum: Duration::from_millis(90) }
     }
 
-    fn push(&mut self, progress: &OperationProgress) {
+    pub(crate) fn push(&mut self, progress: &OperationProgress) {
         let now = Instant::now();
         let due = progress.state.is_finished()
             || matches!(self.last, Some(last) if now.duration_since(last) >= self.minimum)

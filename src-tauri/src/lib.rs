@@ -14,6 +14,9 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use crate::clean::{
+    clean_junk, clean_paths, empty_recycle_bin, get_clean_summary, scan_duplicates, uninstall_app,
+};
 use crate::commands::{
     add_favorite, clear_recents, describe_path, get_category_summary, get_drive_storage,
     get_index_status, list_favorites, list_index_directory, list_recents, read_text_preview,
@@ -30,9 +33,7 @@ use qrcode::render::svg;
 use qrcode::QrCode;
 use serde::Serialize;
 use specta::Type;
-use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::net::UdpSocket;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -84,26 +85,6 @@ pub struct DirectoryListing {
     pub parent_path: Option<String>,
     pub entries: Vec<FileEntry>,
     pub skipped: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct DuplicateGroup {
-    pub fingerprint: String,
-    pub size: u64,
-    pub files: Vec<FileEntry>,
-    pub reclaimable_bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct CleanReport {
-    pub scanned_files: u64,
-    pub skipped: u64,
-    pub large_files: Vec<FileEntry>,
-    pub duplicate_groups: Vec<DuplicateGroup>,
-    pub reclaimable_bytes: u64,
-    pub scanned_at_unix: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Type)]
@@ -478,83 +459,6 @@ where
     (scanned, skipped)
 }
 
-fn hash_file(path: &Path) -> Option<String> {
-    let mut file = open_regular_file(path).ok()?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(hasher.finalize().to_hex().to_string())
-}
-
-fn scan_storage_impl() -> Result<CleanReport, String> {
-    let home = user_home().map_err(|error| error.to_string())?;
-    let mut large_files = Vec::new();
-    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let (scanned_files, mut skipped) = walk_personal_files(&home, |path, metadata| {
-        if clean::is_large_file(metadata.len()) {
-            large_files.push(file_entry(path, metadata));
-        }
-        if !cloud_placeholder(windows_attributes(metadata)) {
-            by_size.entry(metadata.len()).or_default().push(path.to_path_buf());
-        }
-    });
-    large_files.sort_by(|left, right| right.size.cmp(&left.size));
-    large_files.truncate(100);
-
-    let mut duplicate_groups = Vec::new();
-    for (size, paths) in by_size.into_iter().filter(|(_, paths)| paths.len() > 1) {
-        let mut by_hash: HashMap<String, Vec<FileEntry>> = HashMap::new();
-        for path in paths {
-            if let Some(fingerprint) = hash_file(&path) {
-                match validate_user_path(&path, &home) {
-                    Ok(metadata) if metadata.len() == size => {
-                        by_hash.entry(fingerprint).or_default().push(file_entry(&path, &metadata));
-                    }
-                    _ => skipped += 1,
-                }
-            } else {
-                skipped += 1;
-            }
-        }
-        for (fingerprint, files) in by_hash.into_iter().filter(|(_, files)| files.len() > 1) {
-            let reclaimable_bytes = clean::duplicate_reclaimable_bytes(size, files.len());
-            duplicate_groups.push(DuplicateGroup {
-                fingerprint,
-                size,
-                files,
-                reclaimable_bytes,
-            });
-        }
-    }
-    duplicate_groups.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
-    let duplicate_bytes = duplicate_groups.iter().map(|group| group.reclaimable_bytes).sum::<u64>();
-    Ok(CleanReport {
-        scanned_files,
-        skipped,
-        large_files,
-        duplicate_groups,
-        reclaimable_bytes: duplicate_bytes,
-        scanned_at_unix: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn scan_storage() -> Result<CleanReport, String> {
-    tauri::async_runtime::spawn_blocking(scan_storage_impl)
-        .await
-        .map_err(|_| "The storage scan was interrupted.".to_owned())?
-}
-
 fn search_files_impl(query: String) -> Result<SearchResults, String> {
     let term = query.trim().to_lowercase();
     if term.is_empty() {
@@ -773,8 +677,13 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
         tauri_specta::collect_commands![
             list_home_locations,
             list_directory,
-            scan_storage,
             search_files,
+            get_clean_summary,
+            scan_duplicates,
+            clean_junk,
+            clean_paths,
+            empty_recycle_bin,
+            uninstall_app,
             open_file,
             start_share,
             stop_share,
