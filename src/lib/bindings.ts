@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  CacheReport,
   CategorySummary,
   CleanDeleteResult,
   CleanSummary,
@@ -22,6 +23,7 @@ import type {
   RenameOutcome,
   SearchFilter,
   SearchResults,
+  Settings,
   ShareLink,
   TextPreview,
   Thumbnail,
@@ -34,6 +36,7 @@ export type {
   AppSource,
   BlockedItem,
   BlockedReason,
+  CacheReport,
   CardAction,
   CategorySummary,
   CleanCard,
@@ -49,6 +52,7 @@ export type {
   DuplicateFile,
   DuplicateReport,
   DuplicateSet,
+  Exclusion,
   FavoriteItem,
   FileEntry,
   FileProperties,
@@ -71,7 +75,9 @@ export type {
   RenameOutcome,
   SearchFilter,
   SearchResults,
+  Settings,
   ShareLink,
+  SkippedFolder,
   TextPreview,
   Thumbnail,
   ThumbnailKind,
@@ -136,4 +142,19 @@ export const commands = {
   removeFavorite: (path: string): Promise<FavoriteItem[]> => invoke('remove_favorite', { path }),
   listRecents: (limit = 20): Promise<RecentItem[]> => invoke('list_recents', { limit }),
   clearRecents: (): Promise<void> => invoke('clear_recents'),
+
+  /** Everything the Settings screen owns, including the folders Sift never indexes. */
+  getSettings: (): Promise<Settings> => invoke('get_settings'),
+  setTheme: (theme: 'system' | 'light' | 'dark'): Promise<Settings> => invoke('set_theme', { theme }),
+  setScanSchedule: (schedule: 'on_launch' | 'daily' | 'weekly' | 'manual'): Promise<Settings> =>
+    invoke('set_scan_schedule', { schedule }),
+  /** Writes the per-user Windows Run key; resolves to what Windows actually kept. */
+  setStartWithWindows: (enabled: boolean): Promise<boolean> => invoke('set_start_with_windows', { enabled }),
+  addExclusion: (path: string): Promise<Settings> => invoke('add_exclusion', { path }),
+  removeExclusion: (path: string): Promise<Settings> => invoke('remove_exclusion', { path }),
+
+  /** Thumbnail cache size plus the folders the last scan passed over. */
+  getCacheReport: (): Promise<CacheReport> => invoke('get_cache_report'),
+  clearThumbnailCache: (): Promise<CacheReport> => invoke('clear_thumbnail_cache'),
+  clearSkippedFolders: (): Promise<CacheReport> => invoke('clear_skipped_folders'),
 };

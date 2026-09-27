@@ -34,6 +34,8 @@ interface BrowseRouteProps {
   query: string;
   onQueryChange: (query: string) => void;
   onShareRequest?: (entry: FileEntry) => void;
+  /** Opens the skipped-folder list, so "N skipped" is never a dead end. */
+  onOpenSettings?: () => void;
 }
 
 interface MenuState {
@@ -104,7 +106,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement;
 }
 
-export function BrowseRoute({ desktopAvailable, query, onQueryChange, onShareRequest }: BrowseRouteProps) {
+export function BrowseRoute({ desktopAvailable, query, onQueryChange, onShareRequest, onOpenSettings }: BrowseRouteProps) {
   const index = useIndexStore();
   const loadDirectory = useIndexStore((state) => state.loadDirectory);
   const selectedPaths = useAppStore((state) => state.selectedPaths);
@@ -445,7 +447,15 @@ export function BrowseRoute({ desktopAvailable, query, onQueryChange, onShareReq
         <>
           {index.progress?.scanning && <div className="index-progress-card" role="status">
             <span className="index-spinner" /><div className="index-progress-copy"><strong>Building your private index</strong><span>{index.progress.filesScanned.toLocaleString()} files scanned · {index.progress.drive || 'Finding drives'} · {index.progress.currentDir}</span></div>
-            <span className="index-progress-skipped">{index.progress.skipped.toLocaleString()} skipped</span>
+            {index.progress.skipped > 0 && (
+              onOpenSettings ? (
+                <button type="button" className="index-progress-skipped" onClick={onOpenSettings} title="See which folders were skipped">
+                  {index.progress.skipped.toLocaleString()} skipped · why?
+                </button>
+              ) : (
+                <span className="index-progress-skipped">{index.progress.skipped.toLocaleString()} skipped</span>
+              )
+            )}
           </div>}
           {index.progress?.error && <div className="index-inline-error" role="alert"><ShieldCheck size={15} />{index.progress.error}</div>}
 

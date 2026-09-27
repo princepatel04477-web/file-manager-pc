@@ -9,7 +9,8 @@ use specta::Type;
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -17,6 +18,10 @@ use tauri::{AppHandle, Emitter};
 const INSERT_BATCH_SIZE: usize = 5_000;
 const PROGRESS_EVERY_FILES: u64 = 500;
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// How many skipped folders the Settings screen can list. Past this the count
+/// keeps rising but the list stops growing, so one broken drive cannot fill
+/// memory or make the report unreadable.
+pub const MAX_SKIPPED_FOLDERS: usize = 250;
 
 #[derive(Clone, Debug, Default, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -38,15 +43,30 @@ pub struct IndexState {
     roots: Arc<Vec<PathBuf>>,
     progress: Arc<Mutex<IndexProgress>>,
     watched: Arc<Mutex<HashSet<String>>>,
+    /// Folders the user excluded in Settings, already in comparable form.
+    excluded: Arc<RwLock<Vec<String>>>,
+    /// Folders this scan passed over, with the reason, newest first.
+    skipped_folders: Arc<Mutex<Vec<(String, String)>>>,
+    /// Every folder passed over, including any past `MAX_SKIPPED_FOLDERS`.
+    skipped_total: Arc<AtomicU64>,
 }
 
 impl IndexState {
     pub fn new(db: Arc<Database>, roots: Vec<PathBuf>) -> Self {
+        let excluded = db
+            .exclusions()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(path, _, _)| crate::settings::exclusion_key(Path::new(&path)))
+            .collect();
         Self {
             db,
             roots: Arc::new(roots),
             progress: Arc::new(Mutex::new(IndexProgress::default())),
             watched: Arc::new(Mutex::new(HashSet::new())),
+            excluded: Arc::new(RwLock::new(excluded)),
+            skipped_folders: Arc::new(Mutex::new(Vec::new())),
+            skipped_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -54,6 +74,57 @@ impl IndexState {
 
     pub fn progress(&self) -> IndexProgress {
         self.progress.lock().map(|value| value.clone()).unwrap_or_default()
+    }
+
+    /// True when Settings excludes this path, or anything above it. The stored
+    /// keys all end in a separator, so a plain prefix match is the whole test.
+    pub fn is_excluded(&self, path: &Path) -> bool {
+        let key = format!("{}\\", ops::path_key(path));
+        self.excluded
+            .read()
+            .map(|excluded| excluded.iter().any(|value| key.starts_with(value.as_str())))
+            .unwrap_or(false)
+    }
+
+    pub fn set_excluded_paths(&self, values: Vec<String>) {
+        if let Ok(mut excluded) = self.excluded.write() {
+            *excluded = values;
+        }
+    }
+
+    /// Note a folder the scan could not read, or that Settings told it to skip.
+    /// The same folder is only counted once, and the list stops growing at
+    /// `MAX_SKIPPED_FOLDERS` while the total keeps counting.
+    pub fn record_skipped_folder(&self, path: String, reason: &str) {
+        let Ok(mut folders) = self.skipped_folders.lock() else { return };
+        if folders.iter().any(|(value, _)| value == &path) { return; }
+        if folders.len() < MAX_SKIPPED_FOLDERS {
+            folders.push((path, reason.to_owned()));
+        }
+        self.skipped_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The recorded folders, capped at `MAX_SKIPPED_FOLDERS`. Compare with
+    /// `skipped_folders_total` to know whether the list is the whole story.
+    pub fn skipped_folders(&self) -> Vec<(String, String)> {
+        self.skipped_folders
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn skipped_folders_total(&self) -> u64 {
+        self.skipped_total.load(Ordering::Relaxed)
+    }
+
+    /// Forget the skipped-folder record and the counter that goes with it. The
+    /// next scan fills both in again.
+    pub fn clear_skipped_folders(&self) {
+        if let Ok(mut folders) = self.skipped_folders.lock() {
+            folders.clear();
+        }
+        self.skipped_total.store(0, Ordering::Relaxed);
+        self.mutate(|progress| progress.skipped = 0);
     }
 
     fn mutate(&self, edit: impl FnOnce(&mut IndexProgress)) {
@@ -119,42 +190,56 @@ fn run_indexer(app: AppHandle, state: IndexState) {
         }
     };
 
-    let roots = minimal_roots(state.roots());
-    for root in &roots {
-        if !drives.iter().any(|drive| ops::drive_for(root).eq_ignore_ascii_case(&drive.label)) {
+    let mut seen_paths = HashSet::new();
+    // The Settings scan schedule decides whether this launch walks the profile.
+    // `on_launch` (the default) and a never-scanned profile always scan, so the
+    // only launches that skip the walk are the ones the user asked to skip.
+    if crate::settings::scan_is_due(&state.db, crate::settings::now_unix()) {
+        let roots = minimal_roots(state.roots());
+        for root in &roots {
+            if !drives.iter().any(|drive| ops::drive_for(root).eq_ignore_ascii_case(&drive.label)) {
+                increment_skipped(&state);
+            }
+        }
+        let mut batch = Vec::with_capacity(INSERT_BATCH_SIZE);
+        for drive in &drives {
+            state.update(&app, |progress| {
+                progress.drive = drive.label.clone();
+                progress.current_dir = ops::display_path(&drive.path);
+            });
+            let drive_roots = roots
+                .iter()
+                .filter(|root| ops::drive_for(root).eq_ignore_ascii_case(&drive.label))
+                .cloned()
+                .collect::<Vec<_>>();
+            for root in drive_roots {
+                scan_tree(
+                    &app,
+                    &state,
+                    &mut watcher,
+                    &root,
+                    epoch,
+                    &mut batch,
+                    &mut seen_paths,
+                );
+            }
+        }
+        if flush_batch(&state.db, &mut batch).is_err() {
+            state.update(&app, |progress| progress.error = Some("Some file metadata could not be saved to the index.".to_owned()));
             increment_skipped(&state);
         }
-    }
-    let mut seen_paths = HashSet::new();
-    let mut batch = Vec::with_capacity(INSERT_BATCH_SIZE);
-    for drive in &drives {
-        state.update(&app, |progress| {
-            progress.drive = drive.label.clone();
-            progress.current_dir = ops::display_path(&drive.path);
-        });
-        let drive_roots = roots
-            .iter()
-            .filter(|root| ops::drive_for(root).eq_ignore_ascii_case(&drive.label))
-            .cloned()
-            .collect::<Vec<_>>();
-        for root in drive_roots {
-            scan_tree(
-                &app,
-                &state,
-                &mut watcher,
-                &root,
-                epoch,
-                &mut batch,
-                &mut seen_paths,
-            );
+        if state.progress().skipped == 0 && state.db.complete_scan(epoch).is_err() {
+            state.update(&app, |progress| progress.error = Some("The index could not finish reconciling old entries.".to_owned()));
         }
-    }
-    if flush_batch(&state.db, &mut batch).is_err() {
-        state.update(&app, |progress| progress.error = Some("Some file metadata could not be saved to the index.".to_owned()));
-        increment_skipped(&state);
-    }
-    if state.progress().skipped == 0 && state.db.complete_scan(epoch).is_err() {
-        state.update(&app, |progress| progress.error = Some("The index could not finish reconciling old entries.".to_owned()));
+        crate::settings::record_scan(&state.db, crate::settings::now_unix());
+    } else {
+        // The index is still current. Watch the known folders so ordinary changes
+        // still land, and report the size the index already holds.
+        let indexed = state.db.counts().map(|counts| counts.indexed_files).unwrap_or(0);
+        for root in minimal_roots(state.roots()) {
+            register_directory_watch(&mut watcher, &root, &state);
+        }
+        state.update(&app, |progress| progress.files_scanned = indexed);
     }
     state.update(&app, |progress| {
         progress.scanning = false;
@@ -202,21 +287,32 @@ fn scan_tree(
     while let Some(directory) = directories.pop_front() {
         let normalized = ops::normal_path(&directory);
         let display = ops::display_path(&normalized);
-        state.mutate(|progress| progress.current_dir = display);
+        state.mutate(|progress| progress.current_dir = display.clone());
         if ops::is_excluded(&normalized) { continue; }
+        if state.is_excluded(&normalized) {
+            state.record_skipped_folder(display, "Excluded in Settings");
+            continue;
+        }
         let metadata = match ops::validate_path(&normalized, state.roots()) {
             Ok(metadata) if metadata.is_dir() => metadata,
-            Ok(_) => { increment_skipped(state); continue; }
-            Err(_) => { increment_skipped(state); continue; }
+            Ok(_) => { increment_skipped(state); state.record_skipped_folder(display, "No longer a folder"); continue; }
+            Err(AppError::ReparsePoint) => { increment_skipped(state); state.record_skipped_folder(display, "A shortcut or link"); continue; }
+            Err(AppError::OutsideUserFiles) => { increment_skipped(state); state.record_skipped_folder(display, "Outside your user profile"); continue; }
+            Err(_) => { increment_skipped(state); state.record_skipped_folder(display, "Sift needs permission to read this folder"); continue; }
         };
         if ops::is_cloud(ops::attributes(&metadata)) {
             increment_skipped(state);
+            state.record_skipped_folder(display, "Stored in the cloud, not on this PC");
             continue;
         }
         register_directory_watch(watcher, &normalized, state);
         let iterator = match fs::read_dir(ops::io_path(&normalized)) {
             Ok(iterator) => iterator,
-            Err(_) => { increment_skipped(state); continue; }
+            Err(_) => {
+                increment_skipped(state);
+                state.record_skipped_folder(display, "Sift needs permission to read this folder");
+                continue;
+            }
         };
         for entry_result in iterator {
             let entry = match entry_result {
@@ -225,6 +321,12 @@ fn scan_tree(
             };
             let path = ops::normal_path(&entry.path());
             if ops::is_excluded(&path) { continue; }
+            if state.is_excluded(&path) {
+                if fs::symlink_metadata(ops::io_path(&path)).map(|metadata| metadata.is_dir()).unwrap_or(false) {
+                    state.record_skipped_folder(ops::display_path(&path), "Excluded in Settings");
+                }
+                continue;
+            }
             let metadata = match fs::symlink_metadata(ops::io_path(&path)) {
                 Ok(metadata) => metadata,
                 Err(_) => { increment_skipped(state); continue; }
@@ -270,7 +372,7 @@ fn apply_events(
     }
     for path in paths {
         if ops::root_for(&path, state.roots()).is_none() { continue; }
-        if ops::is_excluded(&path) {
+        if ops::is_excluded(&path) || state.is_excluded(&path) {
             let _ = state.db.remove_path(&path);
             unregister_watches(watcher, state, &path);
             continue;

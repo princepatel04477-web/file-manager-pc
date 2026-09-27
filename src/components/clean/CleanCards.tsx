@@ -1,4 +1,5 @@
 import { ArrowDownToLine, ArrowUpRight, Camera, Copy, HardDrive, LayoutGrid, ScanSearch, Trash2 } from 'lucide-react';
+import { motion, useReducedMotion, type Variants } from 'framer-motion';
 import type { CleanCard, CleanSummary, DuplicateReport } from '../../lib/bindings';
 import { readableSize } from '../FileList';
 import type { ConfirmRequest } from './ConfirmCleanSheet';
@@ -33,8 +34,24 @@ interface CleanCardsProps {
 
 /** The six cards, Files by Google style: each one states how much it can give back. */
 export function CleanCards({ summary, duplicates, scanning, desktopAvailable, onReview, onScanDuplicates }: CleanCardsProps) {
+  const reducedMotion = useReducedMotion();
+  // The six cards arrive together, so they settle in one after another rather
+  // than all at once. With reduced motion they are simply there.
+  const grid: Variants = {
+    hidden: {},
+    shown: { transition: { staggerChildren: reducedMotion ? 0 : 0.045, delayChildren: reducedMotion ? 0 : 0.04 } },
+  };
+  const cardVariants: Variants = {
+    hidden: { opacity: 0, y: reducedMotion ? 0 : 10 },
+    shown: {
+      opacity: 1,
+      y: 0,
+      transition: { duration: reducedMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] },
+    },
+  };
+
   return (
-    <div className="clean-card-grid">
+    <motion.div className="clean-card-grid" variants={grid} initial="hidden" animate="shown">
       {summary.cards.map((card: CleanCard) => {
         const Icon = cardIcons[card.id as keyof typeof cardIcons] ?? Trash2;
         const isDuplicates = card.id === 'duplicates';
@@ -49,7 +66,13 @@ export function CleanCards({ summary, duplicates, scanning, desktopAvailable, on
         const actionable = cardIsActionable(card, duplicates !== null) && desktopAvailable;
 
         return (
-          <article key={card.id} className={`clean-card${actionable ? '' : ' is-quiet'}`}>
+          <motion.article
+            key={card.id}
+            className={`clean-card${actionable ? '' : ' is-quiet'}`}
+            variants={cardVariants}
+            whileHover={reducedMotion || !actionable ? undefined : { y: -2 }}
+            whileTap={reducedMotion ? undefined : { scale: 0.995 }}
+          >
             <header className="clean-card-head">
               <span className={`clean-card-icon tone-${card.id}`}><Icon size={17} /></span>
               <div>
@@ -92,9 +115,9 @@ export function CleanCards({ summary, duplicates, scanning, desktopAvailable, on
               </button>
             )}
             {card.skipped > 0 && <p className="clean-card-skipped">{card.skipped.toLocaleString()} entries skipped</p>}
-          </article>
+          </motion.article>
         );
       })}
-    </div>
+    </motion.div>
   );
 }

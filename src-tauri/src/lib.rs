@@ -4,6 +4,7 @@ pub mod db;
 pub mod error;
 pub mod indexer;
 pub mod ops;
+pub mod settings;
 pub mod share;
 pub mod thumbs;
 pub mod vault;
@@ -28,6 +29,7 @@ use crate::ops::commands::{
 };
 use crate::thumbs::get_thumbnail;
 use crate::indexer::IndexState;
+use crate::settings::{CacheReport, Settings};
 use tauri::Manager;
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -912,6 +914,65 @@ fn discover_pc_shares() -> Result<Vec<NearbyShare>, String> {
     Ok(found.into_values().collect())
 }
 
+#[tauri::command]
+#[specta::specta]
+fn get_settings(state: tauri::State<'_, IndexState>) -> Settings {
+    settings::load(&state.db)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn set_theme(theme: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+    settings::set_theme(&state.db, &theme)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn set_scan_schedule(schedule: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+    settings::set_scan_schedule(&state.db, &schedule)
+}
+
+/// Windows owns the autostart entry, so this writes the Run key and reports what
+/// Windows actually ended up with. A refused write is an error, not a silent no.
+#[tauri::command]
+#[specta::specta]
+fn set_start_with_windows(enabled: bool) -> Result<bool, String> {
+    settings::set_start_with_windows(enabled)?;
+    Ok(settings::start_with_windows())
+}
+
+#[tauri::command]
+#[specta::specta]
+fn add_exclusion(path: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+    settings::add_exclusion(&state, &path)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn remove_exclusion(path: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+    settings::remove_exclusion(&state, &path)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn get_cache_report(state: tauri::State<'_, IndexState>) -> CacheReport {
+    settings::cache_report(&state)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn clear_thumbnail_cache(state: tauri::State<'_, IndexState>) -> Result<CacheReport, String> {
+    settings::clear_thumbnail_cache()?;
+    Ok(settings::cache_report(&state))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn clear_skipped_folders(state: tauri::State<'_, IndexState>) -> CacheReport {
+    state.clear_skipped_folders();
+    settings::cache_report(&state)
+}
+
 fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
     let builder = tauri_specta::Builder::<tauri::Wry>::new().commands(
         tauri_specta::collect_commands![
@@ -954,7 +1015,16 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
             add_favorite,
             remove_favorite,
             list_recents,
-            clear_recents
+            clear_recents,
+            get_settings,
+            set_theme,
+            set_scan_schedule,
+            set_start_with_windows,
+            add_exclusion,
+            remove_exclusion,
+            get_cache_report,
+            clear_thumbnail_cache,
+            clear_skipped_folders
         ],
     );
     #[cfg(debug_assertions)]
