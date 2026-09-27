@@ -246,7 +246,7 @@ fn scan_tree(
                 increment_skipped(state);
             }
             let files_scanned = state.progress().files_scanned;
-            if files_scanned > 0 && files_scanned % PROGRESS_EVERY_FILES == 0 {
+            if files_scanned > 0 && files_scanned.is_multiple_of(PROGRESS_EVERY_FILES) {
                 emit_current_progress(app, state);
             }
         }
@@ -378,7 +378,8 @@ pub fn discover_fixed_and_removable_drives() -> Vec<DriveRoot> {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, DRIVE_FIXED, DRIVE_REMOVABLE};
+        use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+        use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
         let bitmask = unsafe { GetLogicalDrives() };
         let mut output = Vec::new();
         for index in 0..26 {

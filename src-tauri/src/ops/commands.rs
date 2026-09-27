@@ -115,6 +115,9 @@ pub fn plan_transfer(
     ))
 }
 
+// Every argument here is a distinct part of one transfer request; bundling them into
+// a struct would only move the same list one level down.
+#[allow(clippy::too_many_arguments)]
 fn run_transfer(
     app: &AppHandle,
     state: &FileOpsState,
@@ -156,7 +159,7 @@ fn run_transfer(
     let result = transfer::execute(&resolved, &context, &mut |progress| emitter.push(&progress));
     let blocked = resolved.blocked.iter().map(|item| item.reason).collect::<Vec<BlockedReason>>();
     let mut errors = result.errors.clone();
-    for reason in blocked {
+    for reason in &blocked {
         errors.push(reason.message().to_owned());
     }
     let (final_state, message) = transfer::finish_state(result.cancelled, result.failed + blocked.len() as u64);

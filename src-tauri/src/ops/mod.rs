@@ -25,7 +25,7 @@ pub fn io_path(path: &Path) -> PathBuf {
         if raw.starts_with(r"\\") {
             return PathBuf::from(format!(r"\\?\UNC\{}", raw.trim_start_matches('\\')));
         }
-        return PathBuf::from(format!(r"\\?\{}", raw));
+        PathBuf::from(format!(r"\\?\{}", raw))
     }
     #[cfg(not(windows))]
     {

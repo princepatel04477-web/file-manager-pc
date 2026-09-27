@@ -178,7 +178,7 @@ impl OpsRegistry {
             .filter(|job| !job.progress.state.is_finished())
             .map(|job| job.progress.clone())
             .collect();
-        running.sort_by(|left, right| left.started_unix.cmp(&right.started_unix));
+        running.sort_by_key(|left| left.started_unix);
         running
     }
 

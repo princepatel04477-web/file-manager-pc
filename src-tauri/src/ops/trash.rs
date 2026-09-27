@@ -134,8 +134,8 @@ mod tests {
         let registry = OpsRegistry::default();
         let (job_id, cancel, _) = registry.start(DELETE_KIND, 1, 0, ops::display_path(&root));
         assert!(registry.request_cancel(&job_id));
-        let context = DeleteContext { registry: &registry, job_id: &job_id, cancel, roots: &[root.clone()] };
-        let result = delete_paths(&[victim.clone()], &context, &mut |_| {});
+        let context = DeleteContext { registry: &registry, job_id: &job_id, cancel, roots: std::slice::from_ref(&root) };
+        let result = delete_paths(std::slice::from_ref(&victim), &context, &mut |_| {});
 
         assert!(result.cancelled);
         assert_eq!(result.moved, 0);
@@ -151,7 +151,7 @@ mod tests {
 
         let registry = OpsRegistry::default();
         let (job_id, cancel, _) = registry.start(DELETE_KIND, 2, 0, String::new());
-        let context = DeleteContext { registry: &registry, job_id: &job_id, cancel, roots: &[root.clone()] };
+        let context = DeleteContext { registry: &registry, job_id: &job_id, cancel, roots: std::slice::from_ref(&root) };
         let result = delete_paths(&[outside.clone(), root.clone()], &context, &mut |_| {});
 
         assert_eq!(result.skipped, 2, "outside path and the root itself");

@@ -39,10 +39,10 @@ pub fn properties(path: &Path) -> Result<(), AppError> {
             fMask: SEE_MASK_FLAG_NO_UI,
             lpVerb: PCWSTR(verb_name.as_ptr()),
             lpFile: PCWSTR(file.as_ptr()),
-            nShow: SW_SHOWNORMAL,
+            nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
-        return unsafe { ShellExecuteExW(&mut info) }.map_err(|_| AppError::Unavailable);
+        unsafe { ShellExecuteExW(&mut info) }.map_err(|_| AppError::Unavailable)
     }
     #[cfg(not(windows))]
     {

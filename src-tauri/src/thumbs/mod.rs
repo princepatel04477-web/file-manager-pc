@@ -184,8 +184,8 @@ mod platform {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
         use windows::Win32::Foundation::SIZE;
-        use windows::Win32::Graphics::Gdi::DeleteObject;
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::Graphics::Gdi::{DeleteObject, HGDIOBJ};
+        use windows::Win32::System::Com::{CoInitializeEx, IBindCtx, COINIT_APARTMENTTHREADED};
         use windows::Win32::UI::Shell::{
             IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
         };
@@ -195,15 +195,11 @@ mod platform {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
             let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-            let mut factory: Option<IShellItemImageFactory> = None;
-            SHCreateItemFromParsingName(
-                PCWSTR(wide.as_ptr()),
-                None,
-                &IShellItemImageFactory::IID,
-                &mut factory as *mut _ as *mut *mut std::ffi::c_void,
-            )
-            .ok()?;
-            let factory = factory?;
+            // This binding hands back the interface directly rather than filling a void
+            // pointer, and naming the bind-context type keeps the `None` from resolving
+            // to the never type.
+            let factory: IShellItemImageFactory =
+                SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>).ok()?;
             let bitmap = factory
                 .GetImage(
                     SIZE { cx: max_dimension as i32, cy: max_dimension as i32 },
@@ -211,12 +207,12 @@ mod platform {
                 )
                 .ok()?;
             let result = read_pixels(bitmap);
-            let _ = DeleteObject(bitmap);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
             result
         }
     }
 
-    unsafe fn read_pixels(bitmap: windows::Win32::Foundation::HBITMAP) -> Option<(Vec<u8>, u32, u32)> {
+    unsafe fn read_pixels(bitmap: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<(Vec<u8>, u32, u32)> {
         use windows::Win32::Graphics::Gdi::{
             GetDIBits, GetDC, ReleaseDC, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
         };

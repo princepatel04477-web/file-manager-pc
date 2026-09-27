@@ -95,10 +95,8 @@ fn write_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 /// Convert the 32-bit BGRA rows Windows hands back into RGBA. Shell bitmaps do not
 /// carry meaningful alpha, so it is forced opaque.
 pub fn bgra_to_rgba(pixels: &mut [u8]) {
-    for chunk in pixels.chunks_exact_mut(4) {
-        let blue = chunk[0];
-        chunk[0] = chunk[2];
-        chunk[2] = blue;
+    for chunk in pixels.as_chunks_mut::<4>().0 {
+        chunk.swap(0, 2);
         chunk[3] = 255;
     }
 }
