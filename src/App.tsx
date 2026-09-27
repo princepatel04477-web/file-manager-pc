@@ -13,6 +13,7 @@ import {
   Copy,
   FileClock,
   Folder,
+  History,
   FolderOpen,
   HardDrive,
   Image as ImageIcon,
@@ -25,6 +26,7 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
+  Star,
   Sun,
   SunMoon,
   Trash2,
@@ -33,11 +35,14 @@ import {
 } from 'lucide-react';
 import { DuplicateReview } from './components/DuplicateReview';
 import { FileList, FileGlyph, readableSize } from './components/FileList';
+import { OperationProgressCard } from './components/OperationProgress';
 import { BrowseRoute } from './routes/BrowseRoute';
 import { commands, type FileEntry, type IndexedEntry, type ShareLink } from './lib/bindings';
 import { useIndexProgress } from './hooks/useIndexProgress';
+import { useOpsProgress } from './hooks/useOpsProgress';
 import { useAppStore } from './stores/app-store';
 import { useIndexStore } from './stores/index-store';
+import { useOpsStore } from './stores/ops-store';
 
 type Tab = 'clean' | 'browse' | 'share';
 type ThemeMode = 'system' | 'light' | 'dark';
@@ -106,13 +111,26 @@ function App() {
   const initializeIndex = useIndexStore((state) => state.initialize);
   const loadIndexDirectory = useIndexStore((state) => state.loadDirectory);
   useIndexProgress();
+  useOpsProgress();
   const notice = useAppStore((state) => state.notice);
   const initialize = useAppStore((state) => state.initialize);
   const openDirectory = useAppStore((state) => state.openDirectory);
   const runScan = useAppStore((state) => state.runScan);
   const toggleSelected = useAppStore((state) => state.toggleSelected);
   const clearSelection = useAppStore((state) => state.clearSelection);
-  const moveToRecycleBin = useAppStore((state) => state.moveToRecycleBin);
+  const deletePaths = useOpsStore((state) => state.deletePaths);
+  const operations = useOpsStore((state) => state.operations);
+  const cancelOperation = useOpsStore((state) => state.cancel);
+  const opsError = useOpsStore((state) => state.error);
+  const opsNotice = useOpsStore((state) => state.notice);
+  const clearOpsError = useOpsStore((state) => state.clearError);
+  const setOpsNotice = useOpsStore((state) => state.setNotice);
+  const favorites = useOpsStore((state) => state.favorites);
+  const recents = useOpsStore((state) => state.recents);
+  const loadFavorites = useOpsStore((state) => state.loadFavorites);
+  const loadRecents = useOpsStore((state) => state.loadRecents);
+  const setSelectedPaths = useAppStore((state) => state.setSelectedPaths);
+  const openFile = useAppStore((state) => state.openFile);
   const setNotice = useAppStore((state) => state.setNotice);
   const clearError = useAppStore((state) => state.clearError);
 
@@ -133,8 +151,10 @@ function App() {
     if (desktopAvailable) {
       void initialize();
       void initializeIndex();
+      void loadFavorites();
+      void loadRecents();
     }
-  }, [desktopAvailable, initialize, initializeIndex]);
+  }, [desktopAvailable, initialize, initializeIndex, loadFavorites, loadRecents]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -184,7 +204,8 @@ function App() {
     if (selectedPaths.length === 0) return;
     const confirmed = window.confirm(`Move ${selectedPaths.length} selected item${selectedPaths.length === 1 ? '' : 's'} to the Recycle Bin?`);
     if (!confirmed) return;
-    await moveToRecycleBin(selectedPaths);
+    await deletePaths(selectedPaths);
+    clearSelection();
   }
 
   async function handleStartShare() {
@@ -223,6 +244,22 @@ function App() {
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
       setShareError('The link could not be copied. You can select and copy it instead.');
+    }
+  }
+
+  function openFavorite(path: string, isDirectory: boolean) {
+    setTab('browse');
+    setQuery('');
+    if (isDirectory) {
+      void loadIndexDirectory(path);
+      void openDirectory(path);
+      return;
+    }
+    const parent = path.slice(0, Math.max(0, Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'))));
+    if (parent) {
+      void loadIndexDirectory(parent);
+      void openDirectory(parent);
+      setSelectedPaths([path]);
     }
   }
 
@@ -270,6 +307,31 @@ function App() {
             })}
             {indexLocations.length === 0 && <span className="sidebar-loading">Your folders will appear here</span>}
           </nav>
+
+          {favorites.length > 0 && <>
+            <div className="sidebar-divider" />
+            <div className="sidebar-section-title"><span>FAVORITES</span></div>
+            <nav className="folder-nav" aria-label="Favorites">
+              {favorites.slice(0, 6).map((favorite) => (
+                <button key={favorite.path} type="button" className="folder-nav-item" title={favorite.path} onClick={() => void openFavorite(favorite.path, favorite.isDirectory)}>
+                  {favorite.isDirectory ? <Star size={16} /> : <Star size={16} />}
+                  <span>{favorite.name}</span>
+                </button>
+              ))}
+            </nav>
+          </>}
+
+          {recents.length > 0 && <>
+            <div className="sidebar-divider" />
+            <div className="sidebar-section-title"><span>RECENT</span></div>
+            <nav className="folder-nav" aria-label="Recent files">
+              {recents.slice(0, 4).map((recent) => (
+                <button key={recent.path} type="button" className="folder-nav-item" title={recent.path} onClick={() => { setTab('browse'); void openFile(recent.path); }}>
+                  <History size={16} /><span>{recent.name}</span>
+                </button>
+              ))}
+            </nav>
+          </>}
           <div className="sidebar-spacer" />
           <div className="privacy-card">
             <span className="privacy-icon"><LockKeyhole size={16} /></span>
@@ -298,15 +360,23 @@ function App() {
           </div>
 
           {!desktopAvailable && <div className="preview-banner"><span className="preview-live-dot" /><div><strong>Desktop preview</strong><span>Connect Sift for Windows to browse your own files. This preview never uses sample or cloud files.</span></div><span className="preview-version">WINDOWS APP</span></div>}
-          {error && <div className="alert-banner error-banner" role="alert"><XCircle size={18} /><span>{error}</span><button type="button" onClick={clearError} aria-label="Dismiss error"><X size={15} /></button></div>}
-          {notice && <div className="alert-banner notice-banner" role="status"><Check size={18} /><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={15} /></button></div>}
+          {(error ?? opsError) && <div className="alert-banner error-banner" role="alert"><XCircle size={18} /><span>{error ?? opsError}</span><button type="button" onClick={() => { clearError(); clearOpsError(); }} aria-label="Dismiss error"><X size={15} /></button></div>}
+          {(notice ?? opsNotice) && <div className="alert-banner notice-banner" role="status"><Check size={18} /><span>{notice ?? opsNotice}</span><button type="button" onClick={() => { setNotice(null); setOpsNotice(null); }} aria-label="Dismiss notification"><X size={15} /></button></div>}
 
           <div className="content-scroll">
             <AnimatePresence mode="wait" initial={false}>
               <motion.section key={tab} className="page-content" initial={{ opacity: 0, y: reducedMotion ? 0 : 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: reducedMotion ? 0 : -5 }} transition={pageMotion}>
                 <div className="section-intro"><p>{tabCopy[tab].subtitle}</p>{tab === 'browse' && currentLocation && <span className="current-location"><Folder size={14} />{currentLocation.label}</span>}</div>
                 {tab === 'browse' ? (
-                  <BrowseRoute desktopAvailable={desktopAvailable} query={query} onQueryChange={setQuery} />
+                  <BrowseRoute
+                    desktopAvailable={desktopAvailable}
+                    query={query}
+                    onQueryChange={setQuery}
+                    onShareRequest={(entry) => {
+                      setSelectedPaths([entry.path]);
+                      setTab('share');
+                    }}
+                  />
                 ) : loading && !desktopAvailable ? <SkeletonPanel /> : tab === 'clean' ? (
                   <CleanPage desktopAvailable={desktopAvailable} scanning={scanning} report={cleanReport} onScan={() => void runScan()} selectedPaths={selectedPaths} onToggle={toggleSelected} onTrash={() => void handleTrash()} />
                 ) : (
@@ -337,6 +407,8 @@ function App() {
         <button type="button" className={tab === 'browse' ? 'active' : ''} onClick={() => setTab('browse')}><FolderOpen size={19} /><span>Browse</span></button>
         <button type="button" className={tab === 'share' ? 'active' : ''} onClick={() => setTab('share')}><Send size={19} /><span>Share</span></button>
       </nav>
+
+      <OperationProgressCard operations={operations} onCancel={(jobId) => void cancelOperation(jobId)} />
     </div>
   );
 }
@@ -391,7 +463,7 @@ function CleanPage({ desktopAvailable, scanning, report, onScan, selectedPaths, 
           </section>
           <section className="clean-section large-files-section">
             <div className="section-title-row"><div><span className="section-overline">WORTH A LOOK</span><h3>Big files</h3><p>Large files in your personal folders, sorted by size.</p></div></div>
-            <FileList entries={openFiles} selectedPaths={selectedPaths} onToggle={onToggle} onOpen={(entry) => onToggle(entry.path)} emptyTitle="No big files found" emptyMessage="Files over 100 MB will show up here after a scan." heightClass="clean-file-scroll" />
+            <FileList entries={openFiles} selectedPaths={selectedPaths} onSelect={(path) => onToggle(path)} onOpen={(entry) => onToggle(entry.path)} emptyTitle="No big files found" emptyMessage="Files over 100 MB will show up here after a scan." heightClass="clean-file-scroll" />
           </section>
         </>
       ) : (

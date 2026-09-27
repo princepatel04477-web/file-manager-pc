@@ -14,7 +14,16 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use crate::commands::{get_category_summary, get_drive_storage, get_index_status, list_index_directory, search_index};
+use crate::commands::{
+    add_favorite, clear_recents, describe_path, get_category_summary, get_drive_storage,
+    get_index_status, list_favorites, list_index_directory, list_recents, read_text_preview,
+    record_recent, remove_favorite, search_index,
+};
+use crate::ops::commands::{
+    cancel_operation, copy_paths, delete_paths, list_operations, move_paths, open_with,
+    plan_transfer, rename_path, reveal_in_explorer, show_properties, FileOpsState,
+};
+use crate::thumbs::get_thumbnail;
 use crate::indexer::IndexState;
 use tauri::Manager;
 use qrcode::render::svg;
@@ -104,13 +113,6 @@ pub struct SearchResults {
     pub scanned: u64,
     pub skipped: u64,
     pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct TrashResult {
-    pub moved: u64,
-    pub skipped: u64,
 }
 
 fn user_home() -> Result<PathBuf, SiftError> {
@@ -582,37 +584,6 @@ async fn search_files(query: String) -> Result<SearchResults, String> {
         .map_err(|_| "File search was interrupted.".to_owned())?
 }
 
-fn trash_paths_impl(paths: Vec<String>) -> Result<TrashResult, String> {
-    let home = user_home().map_err(|error| error.to_string())?;
-    let roots = ops::user_roots();
-    let mut moved = 0_u64;
-    let mut skipped = 0_u64;
-    for value in paths {
-        let path = PathBuf::from(value);
-        let is_user_root = roots.iter().any(|root| ops::is_within(&path, root) && ops::is_within(root, &path));
-        if validate_user_path(&path, &home).is_err() || is_user_root {
-            skipped += 1;
-            continue;
-        }
-        // `trash` routes every deletion through the platform Recycle Bin/Trash.
-        // Passing the extended path preserves Windows long-path support.
-        if trash::delete(io_path(&path)).is_ok() {
-            moved += 1;
-        } else {
-            skipped += 1;
-        }
-    }
-    Ok(TrashResult { moved, skipped })
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn trash_paths(paths: Vec<String>) -> Result<TrashResult, String> {
-    tauri::async_runtime::spawn_blocking(move || trash_paths_impl(paths))
-        .await
-        .map_err(|_| "The Recycle Bin operation was interrupted.".to_owned())?
-}
-
 fn open_file_impl(value: String) -> Result<(), String> {
     let home = user_home().map_err(|error| error.to_string())?;
     let path = PathBuf::from(value);
@@ -659,10 +630,15 @@ fn open_file_impl(value: String) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-async fn open_file(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || open_file_impl(path))
+async fn open_file(path: String, state: tauri::State<'_, IndexState>) -> Result<(), String> {
+    let index = state.inner().clone();
+    let target = path.clone();
+    tauri::async_runtime::spawn_blocking(move || open_file_impl(target))
         .await
-        .map_err(|_| "Windows could not open this file.".to_owned())?
+        .map_err(|_| "Windows could not open this file.".to_owned())??;
+    // Opening a file is what makes it "recent"; a failure above returns early.
+    commands::note_recent(&index, &PathBuf::from(&path), "");
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Type)]
@@ -799,7 +775,6 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
             list_directory,
             scan_storage,
             search_files,
-            trash_paths,
             open_file,
             start_share,
             stop_share,
@@ -807,7 +782,26 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
             get_category_summary,
             get_drive_storage,
             list_index_directory,
-            search_index
+            search_index,
+            plan_transfer,
+            copy_paths,
+            move_paths,
+            rename_path,
+            delete_paths,
+            cancel_operation,
+            list_operations,
+            reveal_in_explorer,
+            open_with,
+            show_properties,
+            get_thumbnail,
+            describe_path,
+            read_text_preview,
+            record_recent,
+            list_favorites,
+            add_favorite,
+            remove_favorite,
+            list_recents,
+            clear_recents
         ],
     );
     #[cfg(debug_assertions)]
@@ -826,6 +820,7 @@ pub fn run() {
     let specta = configure_specta();
     tauri::Builder::default()
         .manage(ShareState::default())
+        .manage(FileOpsState::default())
         .invoke_handler(specta.invoke_handler())
         .setup(|app| {
             let data_dir = app.path().app_local_data_dir()?;

@@ -18,6 +18,14 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("The indexer worker stopped unexpectedly.")]
     WorkerStopped,
+    #[error("The operation was stopped.")]
+    Cancelled,
+    #[error("An item with this name already exists at the destination.")]
+    Conflict,
+    #[error("That name is not valid on Windows.")]
+    InvalidName,
+    #[error("A folder cannot be copied or moved into itself.")]
+    InsideItself,
 }
 
 impl From<AppError> for String {

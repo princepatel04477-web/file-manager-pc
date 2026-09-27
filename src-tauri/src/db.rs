@@ -56,6 +56,25 @@ pub struct IndexCounts {
     pub indexed_directories: u64,
 }
 
+/// A pinned file or folder.
+#[derive(Clone, Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteItem {
+    pub path: String,
+    pub name: String,
+    pub is_directory: bool,
+    pub added_at_unix: i64,
+}
+
+/// A file the user opened recently.
+#[derive(Clone, Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentItem {
+    pub path: String,
+    pub name: String,
+    pub opened_at_unix: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilter {
@@ -67,6 +86,9 @@ pub struct SearchFilter {
     pub modified_before: Option<i64>,
     pub limit: Option<u32>,
 }
+
+/// How many recent files are kept.
+pub const MAX_RECENTS: u32 = 40;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -103,6 +125,20 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_files_category_size ON files(category, size);
              CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
              CREATE INDEX IF NOT EXISTS idx_files_drive ON files(drive);
+             CREATE TABLE IF NOT EXISTS favorites (
+                 id INTEGER PRIMARY KEY,
+                 path TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                 name TEXT NOT NULL,
+                 is_directory INTEGER NOT NULL DEFAULT 0,
+                 added_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS recents (
+                 id INTEGER PRIMARY KEY,
+                 path TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                 name TEXT NOT NULL,
+                 opened_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_recents_opened ON recents(opened_at DESC);
              CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name, content='files', content_rowid='id', tokenize='unicode61');
              CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
                  INSERT INTO files_fts(rowid, name) VALUES (new.id, new.name);
@@ -252,6 +288,100 @@ impl Database {
         Ok(IndexCounts { indexed_files: files.max(0) as u64, indexed_directories: directories.max(0) as u64 })
     }
 
+    /// Pin a file or folder. Pinning the same path again just refreshes the name.
+    pub fn add_favorite(&self, path: &str, name: &str, is_directory: bool, added_at: i64) -> Result<(), AppError> {
+        self.lock()?.execute(
+            "INSERT INTO favorites(path, name, is_directory, added_at) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET name=excluded.name, is_directory=excluded.is_directory",
+            params![path, name, is_directory, added_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_favorite(&self, path: &str) -> Result<(), AppError> {
+        self.lock()?.execute("DELETE FROM favorites WHERE path = ?1", [path])?;
+        Ok(())
+    }
+
+    pub fn is_favorite(&self, path: &str) -> Result<bool, AppError> {
+        let connection = self.lock()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM favorites WHERE path = ?1",
+            [path],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn favorites(&self) -> Result<Vec<FavoriteItem>, AppError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT path, name, is_directory, added_at FROM favorites ORDER BY added_at DESC, name COLLATE NOCASE ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(FavoriteItem {
+                path: row.get(0)?,
+                name: row.get(1)?,
+                is_directory: row.get::<_, bool>(2)?,
+                added_at_unix: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// Record an open, newest first, keeping at most [`MAX_RECENTS`] entries.
+    pub fn push_recent(&self, path: &str, name: &str, opened_at: i64) -> Result<(), AppError> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO recents(path, name, opened_at) VALUES(?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET name=excluded.name, opened_at=excluded.opened_at",
+            params![path, name, opened_at],
+        )?;
+        transaction.execute(
+            "DELETE FROM recents WHERE id NOT IN (SELECT id FROM recents ORDER BY opened_at DESC, id DESC LIMIT ?1)",
+            [MAX_RECENTS],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn recents(&self, limit: u32) -> Result<Vec<RecentItem>, AppError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT path, name, opened_at FROM recents ORDER BY opened_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit.clamp(1, MAX_RECENTS)], |row| {
+            Ok(RecentItem { path: row.get(0)?, name: row.get(1)?, opened_at_unix: row.get(2)? })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn clear_recents(&self) -> Result<(), AppError> {
+        self.lock()?.execute("DELETE FROM recents", [])?;
+        Ok(())
+    }
+
+    /// Drop favourites and recents for paths that no longer exist, so both lists stay
+    /// honest after a delete, move, or rename.
+    pub fn forget_paths(&self, paths: &[String]) -> Result<(), AppError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        {
+            let mut favorites = transaction.prepare("DELETE FROM favorites WHERE path = ?1")?;
+            let mut recents = transaction.prepare("DELETE FROM recents WHERE path = ?1")?;
+            for path in paths {
+                favorites.execute([path])?;
+                recents.execute([path])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn path_entry(&self, path: &str) -> Result<Option<IndexedEntry>, AppError> {
         let connection = self.lock()?;
         connection
@@ -337,5 +467,73 @@ mod tests {
     #[test]
     fn fts_query_rejects_blank_input() {
         assert!(fts_prefix_query("  \n ").is_err());
+    }
+
+    fn temp_database(tag: &str) -> (Database, PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("sift-db-{tag}-{unique}")).join("index.sqlite");
+        let database = Database::open(&path).expect("database opens");
+        (database, path)
+    }
+
+    #[test]
+    fn favourites_round_trip_and_are_case_insensitive() {
+        let (database, path) = temp_database("favourites");
+        database.add_favorite("C:\\Users\\u\\Documents\\Report.pdf", "Report.pdf", false, 1_700_000_010).expect("add");
+        database.add_favorite("C:\\Users\\u\\Pictures", "Pictures", true, 1_700_000_020).expect("add");
+        // Pinning the same path with different casing must not create a second row.
+        database.add_favorite("c:\\users\\u\\documents\\report.pdf", "Report.pdf", false, 1_700_000_010).expect("re-add");
+
+        let favourites = database.favorites().expect("list");
+        assert_eq!(favourites.len(), 2);
+        assert_eq!(favourites[0].name, "Pictures", "newest first");
+        assert!(favourites[0].is_directory);
+        assert!(database.is_favorite("C:\\USERS\\u\\Documents\\REPORT.pdf").expect("lookup"));
+        assert!(!database.is_favorite("C:\\Users\\u\\Documents\\Other.pdf").expect("lookup"));
+
+        database.remove_favorite("C:\\Users\\u\\Pictures").expect("remove");
+        assert_eq!(database.favorites().expect("list").len(), 1);
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn recents_keep_the_newest_entries_and_deduplicate_paths() {
+        let (database, path) = temp_database("recents");
+        for index in 0..(MAX_RECENTS + 10) {
+            database.push_recent(&format!("C:\\Users\\u\\file{index}.txt"), &format!("file{index}.txt"), 1_700_000_000 + index as i64).expect("push");
+        }
+        let recents = database.recents(MAX_RECENTS).expect("list");
+        assert_eq!(recents.len(), MAX_RECENTS as usize, "older entries are pruned");
+        assert_eq!(recents[0].opened_at_unix, 1_700_000_000 + MAX_RECENTS as i64 + 9, "newest first");
+
+        // Re-opening a file moves it to the top instead of duplicating it.
+        database.push_recent("C:\\Users\\u\\file0.txt", "file0.txt", 1_800_000_000).expect("push");
+        let recents = database.recents(MAX_RECENTS).expect("list");
+        assert_eq!(recents.len(), MAX_RECENTS as usize);
+        assert_eq!(recents[0].path, "C:\\Users\\u\\file0.txt");
+
+        assert!(database.recents(5).expect("limit").len() == 5);
+        database.clear_recents().expect("clear");
+        assert!(database.recents(MAX_RECENTS).expect("list").is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn forgetting_paths_clears_both_lists() {
+        let (database, path) = temp_database("forget");
+        database.add_favorite("C:\\Users\\u\\gone.pdf", "gone.pdf", false, 1).expect("add");
+        database.push_recent("C:\\Users\\u\\gone.pdf", "gone.pdf", 2).expect("push");
+        database.push_recent("C:\\Users\\u\\keep.pdf", "keep.pdf", 3).expect("push");
+
+        database.forget_paths(&["C:\\Users\\u\\gone.pdf".to_owned()]).expect("forget");
+        assert!(database.favorites().expect("list").is_empty());
+        let recents = database.recents(MAX_RECENTS).expect("list");
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].name, "keep.pdf");
+        database.forget_paths(&[]).expect("empty is a no-op");
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
     }
 }
