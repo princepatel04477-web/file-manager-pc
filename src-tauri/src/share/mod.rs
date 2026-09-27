@@ -1,4 +1,5 @@
-pub const SESSION_LIFETIME_SECONDS: u64 = 20 * 60;
+pub const SESSION_LIFETIME_SECONDS: u64 = 10 * 60;
+pub mod pc;
 
 pub fn safe_attachment_name(name: &str) -> String {
     let value = name

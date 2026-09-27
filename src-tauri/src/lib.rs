@@ -9,7 +9,7 @@ pub mod thumbs;
 pub mod vault;
 
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, State as AxumState};
+use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -31,12 +31,13 @@ use crate::indexer::IndexState;
 use tauri::Manager;
 use qrcode::render::svg;
 use qrcode::QrCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -672,6 +673,244 @@ fn stop_share(state: tauri::State<'_, ShareState>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NearbyShare {
+    pub id: String,
+    pub device_name: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PcShareSession {
+    pub device_name: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub pairing_code: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Clone)]
+struct PcSharePayload {
+    token: String,
+    pairing_code: String,
+    path: PathBuf,
+    file_name: String,
+    bytes_sent: Arc<AtomicU64>,
+}
+
+struct PcShareSessionState {
+    stop: oneshot::Sender<()>,
+    daemon: mdns_sd::ServiceDaemon,
+    service_name: String,
+    bytes_sent: Arc<AtomicU64>,
+    expires_at: std::time::Instant,
+}
+
+#[derive(Default)]
+struct PcShareState {
+    active: Mutex<Option<PcShareSessionState>>,
+}
+
+#[derive(Deserialize)]
+struct PairingQuery {
+    code: String,
+}
+
+async fn download_pc_shared_file(
+    AxumState(payload): AxumState<Arc<PcSharePayload>>,
+    AxumPath(token): AxumPath<String>,
+    Query(query): Query<PairingQuery>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let cors = [
+        (axum::http::HeaderName::from_static("access-control-allow-origin"), HeaderValue::from_static("*")),
+        (axum::http::HeaderName::from_static("access-control-expose-headers"), HeaderValue::from_static("Content-Range, Content-Length, Accept-Ranges, Content-Disposition")),
+        (axum::http::HeaderName::from_static("accept-ranges"), HeaderValue::from_static("bytes")),
+    ];
+    if token != payload.token || !share::pc::valid_pairing_code(&query.code, &payload.pairing_code) {
+        let mut response = (StatusCode::NOT_FOUND, "Not found").into_response();
+        response.headers_mut().insert(axum::http::HeaderName::from_static("access-control-allow-origin"), HeaderValue::from_static("*"));
+        return response;
+    }
+    let home = match user_home() {
+        Ok(home) => home,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let metadata = match validate_user_path(&payload.path, &home) {
+        Ok(metadata) if metadata.is_file() && !cloud_placeholder(windows_attributes(&metadata)) => metadata,
+        _ => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let range = headers.get(header::RANGE).and_then(|value| value.to_str().ok())
+        .and_then(|value| share::pc::parse_range(value, metadata.len()));
+    let partial_requested = headers.contains_key(header::RANGE);
+    if partial_requested && range.is_none() {
+        let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+        response.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{}", metadata.len())).unwrap_or_else(|_| HeaderValue::from_static("bytes */0")));
+        response.headers_mut().insert(axum::http::HeaderName::from_static("access-control-allow-origin"), HeaderValue::from_static("*"));
+        return response;
+    }
+    let (start, end_exclusive) = range.map(|range| (range.start, range.end)).unwrap_or((0, metadata.len()));
+    let mut file = match open_regular_file(&payload.path) {
+        Ok(file) => tokio::fs::File::from_std(file),
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    if tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start)).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Could not seek file").into_response();
+    }
+    use tokio::io::AsyncReadExt;
+    let limited = file.take(end_exclusive.saturating_sub(start));
+    let tracker = payload.bytes_sent.clone();
+    let stream = tokio_stream::StreamExt::map(ReaderStream::new(limited), move |chunk| {
+        if let Ok(bytes) = &chunk { tracker.fetch_add(bytes.len() as u64, Ordering::Relaxed); }
+        chunk
+    });
+    let mut response = Body::from_stream(stream).into_response();
+    *response.status_mut() = if partial_requested { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    response.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from_str(&(end_exclusive - start).to_string()).unwrap_or_else(|_| HeaderValue::from_static("0")));
+    response.headers_mut().insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&format!("attachment; filename=\"{}\"", share::safe_attachment_name(&payload.file_name))).unwrap_or_else(|_| HeaderValue::from_static("attachment")));
+    if partial_requested {
+        response.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end_exclusive.saturating_sub(1), metadata.len())).unwrap_or_else(|_| HeaderValue::from_static("bytes */0")));
+    }
+    for (name, value) in cors { response.headers_mut().insert(name, value); }
+    response
+}
+
+async fn pc_share_options() -> impl IntoResponse {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(axum::http::HeaderName::from_static("access-control-allow-origin"), HeaderValue::from_static("*"));
+    response.headers_mut().insert(axum::http::HeaderName::from_static("access-control-allow-methods"), HeaderValue::from_static("GET, OPTIONS"));
+    response.headers_mut().insert(axum::http::HeaderName::from_static("access-control-allow-headers"), HeaderValue::from_static("Range"));
+    response
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn start_pc_share(path: String, state: tauri::State<'_, PcShareState>) -> Result<PcShareSession, String> {
+    let home = user_home().map_err(|error| error.to_string())?;
+    let file_path = PathBuf::from(&path);
+    let metadata = validate_user_path(&file_path, &home).map_err(|error| error.to_string())?;
+    if !metadata.is_file() { return Err("Choose one file to send; folders are not supported.".to_owned()); }
+    if cloud_placeholder(windows_attributes(&metadata)) { return Err("This file is online-only. Download it in Windows before sending.".to_owned()); }
+
+    let route = UdpSocket::bind("0.0.0.0:0").map_err(|_| "Could not find a network connection. Connect this PC to Wi-Fi or Ethernet.".to_owned())?;
+    route.connect("8.8.8.8:80").map_err(|_| "Connect both PCs to the same Wi-Fi or local network.".to_owned())?;
+    let host = route.local_addr().map_err(|_| "Could not determine this PC's network address.".to_owned())?.ip();
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            "Windows blocked the sharing port. Allow Sift through Windows Firewall on Private networks, then try again.".to_owned()
+        } else { "Sift could not open a local sharing port. Check Windows Firewall and network permissions.".to_owned() }
+    })?;
+    let port = listener.local_addr().map_err(|_| "Could not open a local sharing port.".to_owned())?.port();
+    let mut random = [0_u8; 24];
+    getrandom::getrandom(&mut random).map_err(|_| "Could not create a secure sharing session.".to_owned())?;
+    let token = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let mut code_random = [0_u8; 4];
+    getrandom::getrandom(&mut code_random).map_err(|_| "Could not create a pairing code.".to_owned())?;
+    let pairing_code = share::pc::pairing_code(code_random);
+    let file_name = file_path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| "Shared file".to_owned());
+    let device_name = share::pc::safe_device_name(&std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Sift PC".to_owned()));
+
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|_| "Nearby discovery could not start. Check that multicast is available on this network.".to_owned())?;
+    let instance = format!("{}-{}", device_name.replace(' ', "-"), &token[..8]);
+    let mut properties = std::collections::HashMap::new();
+    properties.insert("token".to_owned(), token.clone());
+    properties.insert("file".to_owned(), file_name.clone());
+    properties.insert("device".to_owned(), device_name.clone());
+    properties.insert("size".to_owned(), metadata.len().to_string());
+    let hostname = format!("{instance}.local.");
+    let service = mdns_sd::ServiceInfo::new(share::pc::SERVICE_TYPE, &instance, &hostname, host, port, properties)
+        .map_err(|_| "Sift could not advertise this device on the local network.".to_owned())?;
+    let service_name = service.get_fullname().to_owned();
+    daemon.register(service).map_err(|_| "Sift could not advertise this device. Windows Firewall may be blocking local network discovery.".to_owned())?;
+
+    let file_size = metadata.len();
+    let bytes_sent = Arc::new(AtomicU64::new(0));
+    let payload = Arc::new(PcSharePayload { token, pairing_code: pairing_code.clone(), path: file_path, file_name: file_name.clone(), bytes_sent: bytes_sent.clone() });
+    let router = Router::new().route("/{token}/download", get(download_pc_shared_file).options(pc_share_options)).with_state(payload);
+    let (stop, stopped) = oneshot::channel::<()>();
+    let server_daemon = daemon.clone();
+    let server_name = service_name.clone();
+    tokio::spawn(async move {
+        let timeout = tokio::time::sleep(Duration::from_secs(share::pc::PC_SESSION_LIFETIME_SECONDS));
+        let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+            tokio::select! { _ = stopped => {}, _ = timeout => {} }
+        });
+        let _ = server.await;
+        let _ = server_daemon.unregister(&server_name);
+        let _ = server_daemon.shutdown();
+    });
+    let mut active = state.active.lock().map_err(|_| "Nearby sharing could not be started.".to_owned())?;
+    if let Some(previous) = active.take() {
+        let _ = previous.stop.send(());
+        let _ = previous.daemon.unregister(&previous.service_name);
+        let _ = previous.daemon.shutdown();
+    }
+    *active = Some(PcShareSessionState { stop, daemon, service_name, bytes_sent, expires_at: std::time::Instant::now() + Duration::from_secs(share::pc::PC_SESSION_LIFETIME_SECONDS) });
+    Ok(PcShareSession { device_name, file_name, file_size, pairing_code, expires_in_seconds: share::pc::PC_SESSION_LIFETIME_SECONDS })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn stop_pc_share(state: tauri::State<'_, PcShareState>) -> Result<(), String> {
+    let mut active = state.active.lock().map_err(|_| "Nearby sharing could not be stopped.".to_owned())?;
+    if let Some(session) = active.take() {
+        let _ = session.stop.send(());
+        let _ = session.daemon.unregister(&session.service_name);
+        let _ = session.daemon.shutdown();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+fn get_pc_share_progress(state: tauri::State<'_, PcShareState>) -> Result<Option<u64>, String> {
+    let mut active = state.active.lock().map_err(|_| "Sharing status is unavailable.".to_owned())?;
+    if active.as_ref().is_some_and(|session| std::time::Instant::now() >= session.expires_at) {
+        if let Some(session) = active.take() {
+            let _ = session.stop.send(());
+            let _ = session.daemon.unregister(&session.service_name);
+            let _ = session.daemon.shutdown();
+        }
+        return Ok(None);
+    }
+    Ok(active.as_ref().map(|session| session.bytes_sent.load(Ordering::Relaxed)))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn discover_pc_shares() -> Result<Vec<NearbyShare>, String> {
+    use mdns_sd::ServiceEvent;
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|_| "Nearby discovery could not start. Check that multicast is available on this network.".to_owned())?;
+    let receiver = daemon.browse(share::pc::SERVICE_TYPE).map_err(|_| "Nearby discovery could not start.".to_owned())?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    let mut found = std::collections::HashMap::<String, NearbyShare>::new();
+    while std::time::Instant::now() < deadline {
+        match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(ServiceEvent::ServiceResolved(info)) => {
+                let Some(token) = info.get_property_val_str("token") else { continue; };
+                let Some(file_name) = info.get_property_val_str("file") else { continue; };
+                let device_name = info.get_property_val_str("device").map(share::pc::safe_device_name).unwrap_or_else(|| "Nearby PC".to_owned());
+                let file_size = info.get_property_val_str("size").and_then(|size| size.parse().ok()).unwrap_or(0);
+                let Some(host) = info.get_addresses().iter().next().map(ToString::to_string) else { continue; };
+                let id = info.get_fullname().to_owned();
+                found.insert(id.clone(), NearbyShare { id, device_name, file_name: file_name.to_owned(), file_size, host, port: info.get_port(), token: token.to_owned() });
+            }
+            Err(_) => continue,
+            _ => {},
+        }
+    }
+    let _ = daemon.stop_browse(share::pc::SERVICE_TYPE);
+    let _ = daemon.shutdown();
+    Ok(found.into_values().collect())
+}
+
 fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
     let builder = tauri_specta::Builder::<tauri::Wry>::new().commands(
         tauri_specta::collect_commands![
@@ -687,6 +926,10 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
             open_file,
             start_share,
             stop_share,
+            start_pc_share,
+            stop_pc_share,
+            discover_pc_shares,
+            get_pc_share_progress,
             get_index_status,
             get_category_summary,
             get_drive_storage,
@@ -729,6 +972,7 @@ pub fn run() {
     let specta = configure_specta();
     tauri::Builder::default()
         .manage(ShareState::default())
+        .manage(PcShareState::default())
         .manage(FileOpsState::default())
         .invoke_handler(specta.invoke_handler())
         .setup(|app| {
