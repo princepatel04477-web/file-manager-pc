@@ -1,3 +1,10 @@
+pub mod commands;
+pub mod conflict;
+pub mod progress;
+pub mod shell;
+pub mod transfer;
+pub mod trash;
+
 use crate::error::AppError;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -50,6 +57,24 @@ fn compare_path(path: &Path) -> String {
     { value.to_lowercase() }
     #[cfg(not(windows))]
     { value }
+}
+
+/// Platform comparison key for a path (lower-case, backslash separated on Windows).
+/// Exposed so planning logic and its tests share one definition of path equality.
+pub fn path_key(path: &Path) -> String {
+    compare_path(path)
+}
+
+/// True when both paths address the same item, using the platform comparison rules.
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    compare_path(left) == compare_path(right)
+}
+
+/// File name of a path, as displayed to the user.
+pub fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 pub fn is_within(path: &Path, root: &Path) -> bool {

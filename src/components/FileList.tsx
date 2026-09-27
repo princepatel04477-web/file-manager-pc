@@ -1,13 +1,24 @@
-import { useRef } from 'react';
+import { useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Archive, AudioLines, Cloud, File, FileImage, FileText, Folder, Film, HardDrive } from 'lucide-react';
 import type { FileEntry } from '../lib/bindings';
+import { useMarquee } from '../hooks/useMarquee';
+import { useThumbnail } from './Thumbnail';
+
+export interface SelectionModifiers {
+  additive: boolean;
+  range: boolean;
+}
 
 interface FileListProps {
   entries: FileEntry[];
   selectedPaths: string[];
-  onToggle: (path: string) => void;
+  onSelect: (path: string, modifiers: SelectionModifiers) => void;
+  onSelectMany?: (paths: string[], additive: boolean) => void;
   onOpen: (entry: FileEntry) => void;
+  onContextMenu?: (position: { x: number; y: number }, entry: FileEntry | null) => void;
+  onRenameRequest?: (entry: FileEntry) => void;
+  showThumbnails?: boolean;
   emptyTitle?: string;
   emptyMessage?: string;
   heightClass?: string;
@@ -38,6 +49,13 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
   return <span className={className}><File size={18} strokeWidth={1.8} /></span>;
 }
 
+/** Shell thumbnail when one exists, otherwise the usual type glyph. */
+function EntryThumb({ entry, enabled }: { entry: FileEntry; enabled: boolean }) {
+  const source = useThumbnail(entry, enabled);
+  if (!source) return <FileGlyph entry={entry} />;
+  return <span className={`file-glyph glyph-thumb${entry.kind === 'video' ? ' has-video-badge' : ''}`}><img src={source} alt="" loading="lazy" /></span>;
+}
+
 function modifiedLabel(timestamp: number | null): string {
   if (timestamp === null) return '—';
   const date = new Date(timestamp * 1000);
@@ -49,8 +67,12 @@ function modifiedLabel(timestamp: number | null): string {
 export function FileList({
   entries,
   selectedPaths,
-  onToggle,
+  onSelect,
+  onSelectMany,
   onOpen,
+  onContextMenu,
+  onRenameRequest,
+  showThumbnails = false,
   emptyTitle = 'Nothing here yet',
   emptyMessage = 'Files in this folder will appear here.',
   heightClass = 'file-list-scroll',
@@ -63,6 +85,11 @@ export function FileList({
     overscan: 10,
   });
   const virtualRows = virtualizer.getVirtualItems();
+  const marquee = useMarquee(
+    scrollRef,
+    (paths, additive) => onSelectMany?.(paths, additive),
+    () => onSelectMany?.([], false),
+  );
 
   return (
     <div className="file-list-shell">
@@ -92,11 +119,13 @@ export function FileList({
                   role="row"
                   tabIndex={0}
                   data-file-index={virtualRow.index}
+                  data-file-path={entry.path}
                   aria-selected={selected}
                   aria-label={`${entry.isDirectory ? 'Folder' : 'File'} ${entry.name}${entry.isCloudPlaceholder ? ', online only' : ''}`}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') { event.preventDefault(); onOpen(entry); }
-                    else if (event.key === ' ') { event.preventDefault(); onToggle(entry.path); }
+                    else if (event.key === ' ') { event.preventDefault(); onSelect(entry.path, { additive: true, range: false }); }
+                    else if (event.key === 'F2') { event.preventDefault(); onRenameRequest?.(entry); }
                     else if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
                       event.preventDefault();
                       const next = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1 : Math.max(0, Math.min(entries.length - 1, virtualRow.index + (event.key === 'ArrowDown' ? 1 : -1)));
@@ -104,12 +133,21 @@ export function FileList({
                       window.requestAnimationFrame(() => scrollRef.current?.querySelector<HTMLElement>(`[data-file-index="${next}"]`)?.focus());
                     }
                   }}
-                  onClick={(event) => {
+                  onClick={(event: ReactMouseEvent<HTMLDivElement>) => {
                     const target = event.target;
                     if (target instanceof Element && target.closest('button, input')) return;
-                    onToggle(entry.path);
+                    onSelect(entry.path, {
+                      additive: event.ctrlKey || event.metaKey,
+                      range: event.shiftKey,
+                    });
                   }}
                   onDoubleClick={() => onOpen(entry)}
+                  onContextMenu={(event) => {
+                    if (!onContextMenu) return;
+                    event.preventDefault();
+                    onSelect(entry.path, { additive: event.ctrlKey || event.metaKey || selected, range: false });
+                    onContextMenu({ x: event.clientX, y: event.clientY }, entry);
+                  }}
                   style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >
                   <div className="file-name-cell">
@@ -118,9 +156,9 @@ export function FileList({
                       aria-label={`Select ${entry.name}`}
                       type="checkbox"
                       checked={selected}
-                      onChange={() => onToggle(entry.path)}
+                      onChange={() => onSelect(entry.path, { additive: true, range: false })}
                     />
-                    <FileGlyph entry={entry} />
+                    <EntryThumb entry={entry} enabled={showThumbnails} />
                     <div className="file-name-wrap">
                       <span className="file-name" title={entry.name}>{entry.name}</span>
                       {entry.isCloudPlaceholder && <span className="cloud-label"><Cloud size={12} /> Online only</span>}
@@ -133,10 +171,11 @@ export function FileList({
               );
             })}
           </div>
+          {marquee && <span className="marquee-rect" style={{ left: marquee.left, top: marquee.top, width: marquee.width, height: marquee.height }} aria-hidden="true" />}
         </div>
       )}
     </div>
   );
 }
 
-export { FileGlyph, readableSize };
+export { EntryThumb, FileGlyph, readableSize };

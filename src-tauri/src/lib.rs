@@ -14,16 +14,26 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use crate::commands::{get_category_summary, get_drive_storage, get_index_status, list_index_directory, search_index};
+use crate::clean::{
+    clean_junk, clean_paths, empty_recycle_bin, get_clean_summary, scan_duplicates, uninstall_app,
+};
+use crate::commands::{
+    add_favorite, clear_recents, describe_path, get_category_summary, get_drive_storage,
+    get_index_status, list_favorites, list_index_directory, list_recents, read_text_preview,
+    record_recent, remove_favorite, search_index,
+};
+use crate::ops::commands::{
+    cancel_operation, copy_paths, delete_paths, list_operations, move_paths, open_with,
+    plan_transfer, rename_path, reveal_in_explorer, show_properties, FileOpsState,
+};
+use crate::thumbs::get_thumbnail;
 use crate::indexer::IndexState;
 use tauri::Manager;
 use qrcode::render::svg;
 use qrcode::QrCode;
 use serde::Serialize;
 use specta::Type;
-use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::net::UdpSocket;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -79,38 +89,11 @@ pub struct DirectoryListing {
 
 #[derive(Clone, Debug, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct DuplicateGroup {
-    pub fingerprint: String,
-    pub size: u64,
-    pub files: Vec<FileEntry>,
-    pub reclaimable_bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct CleanReport {
-    pub scanned_files: u64,
-    pub skipped: u64,
-    pub large_files: Vec<FileEntry>,
-    pub duplicate_groups: Vec<DuplicateGroup>,
-    pub reclaimable_bytes: u64,
-    pub scanned_at_unix: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
 pub struct SearchResults {
     pub entries: Vec<FileEntry>,
     pub scanned: u64,
     pub skipped: u64,
     pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct TrashResult {
-    pub moved: u64,
-    pub skipped: u64,
 }
 
 fn user_home() -> Result<PathBuf, SiftError> {
@@ -476,83 +459,6 @@ where
     (scanned, skipped)
 }
 
-fn hash_file(path: &Path) -> Option<String> {
-    let mut file = open_regular_file(path).ok()?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(hasher.finalize().to_hex().to_string())
-}
-
-fn scan_storage_impl() -> Result<CleanReport, String> {
-    let home = user_home().map_err(|error| error.to_string())?;
-    let mut large_files = Vec::new();
-    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let (scanned_files, mut skipped) = walk_personal_files(&home, |path, metadata| {
-        if clean::is_large_file(metadata.len()) {
-            large_files.push(file_entry(path, metadata));
-        }
-        if !cloud_placeholder(windows_attributes(metadata)) {
-            by_size.entry(metadata.len()).or_default().push(path.to_path_buf());
-        }
-    });
-    large_files.sort_by(|left, right| right.size.cmp(&left.size));
-    large_files.truncate(100);
-
-    let mut duplicate_groups = Vec::new();
-    for (size, paths) in by_size.into_iter().filter(|(_, paths)| paths.len() > 1) {
-        let mut by_hash: HashMap<String, Vec<FileEntry>> = HashMap::new();
-        for path in paths {
-            if let Some(fingerprint) = hash_file(&path) {
-                match validate_user_path(&path, &home) {
-                    Ok(metadata) if metadata.len() == size => {
-                        by_hash.entry(fingerprint).or_default().push(file_entry(&path, &metadata));
-                    }
-                    _ => skipped += 1,
-                }
-            } else {
-                skipped += 1;
-            }
-        }
-        for (fingerprint, files) in by_hash.into_iter().filter(|(_, files)| files.len() > 1) {
-            let reclaimable_bytes = clean::duplicate_reclaimable_bytes(size, files.len());
-            duplicate_groups.push(DuplicateGroup {
-                fingerprint,
-                size,
-                files,
-                reclaimable_bytes,
-            });
-        }
-    }
-    duplicate_groups.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
-    let duplicate_bytes = duplicate_groups.iter().map(|group| group.reclaimable_bytes).sum::<u64>();
-    Ok(CleanReport {
-        scanned_files,
-        skipped,
-        large_files,
-        duplicate_groups,
-        reclaimable_bytes: duplicate_bytes,
-        scanned_at_unix: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn scan_storage() -> Result<CleanReport, String> {
-    tauri::async_runtime::spawn_blocking(scan_storage_impl)
-        .await
-        .map_err(|_| "The storage scan was interrupted.".to_owned())?
-}
-
 fn search_files_impl(query: String) -> Result<SearchResults, String> {
     let term = query.trim().to_lowercase();
     if term.is_empty() {
@@ -580,37 +486,6 @@ async fn search_files(query: String) -> Result<SearchResults, String> {
     tauri::async_runtime::spawn_blocking(move || search_files_impl(query))
         .await
         .map_err(|_| "File search was interrupted.".to_owned())?
-}
-
-fn trash_paths_impl(paths: Vec<String>) -> Result<TrashResult, String> {
-    let home = user_home().map_err(|error| error.to_string())?;
-    let roots = ops::user_roots();
-    let mut moved = 0_u64;
-    let mut skipped = 0_u64;
-    for value in paths {
-        let path = PathBuf::from(value);
-        let is_user_root = roots.iter().any(|root| ops::is_within(&path, root) && ops::is_within(root, &path));
-        if validate_user_path(&path, &home).is_err() || is_user_root {
-            skipped += 1;
-            continue;
-        }
-        // `trash` routes every deletion through the platform Recycle Bin/Trash.
-        // Passing the extended path preserves Windows long-path support.
-        if trash::delete(io_path(&path)).is_ok() {
-            moved += 1;
-        } else {
-            skipped += 1;
-        }
-    }
-    Ok(TrashResult { moved, skipped })
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn trash_paths(paths: Vec<String>) -> Result<TrashResult, String> {
-    tauri::async_runtime::spawn_blocking(move || trash_paths_impl(paths))
-        .await
-        .map_err(|_| "The Recycle Bin operation was interrupted.".to_owned())?
 }
 
 fn open_file_impl(value: String) -> Result<(), String> {
@@ -659,10 +534,15 @@ fn open_file_impl(value: String) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-async fn open_file(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || open_file_impl(path))
+async fn open_file(path: String, state: tauri::State<'_, IndexState>) -> Result<(), String> {
+    let index = state.inner().clone();
+    let target = path.clone();
+    tauri::async_runtime::spawn_blocking(move || open_file_impl(target))
         .await
-        .map_err(|_| "Windows could not open this file.".to_owned())?
+        .map_err(|_| "Windows could not open this file.".to_owned())??;
+    // Opening a file is what makes it "recent"; a failure above returns early.
+    commands::note_recent(&index, &PathBuf::from(&path), "");
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Type)]
@@ -797,9 +677,13 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
         tauri_specta::collect_commands![
             list_home_locations,
             list_directory,
-            scan_storage,
             search_files,
-            trash_paths,
+            get_clean_summary,
+            scan_duplicates,
+            clean_junk,
+            clean_paths,
+            empty_recycle_bin,
+            uninstall_app,
             open_file,
             start_share,
             stop_share,
@@ -807,7 +691,26 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
             get_category_summary,
             get_drive_storage,
             list_index_directory,
-            search_index
+            search_index,
+            plan_transfer,
+            copy_paths,
+            move_paths,
+            rename_path,
+            delete_paths,
+            cancel_operation,
+            list_operations,
+            reveal_in_explorer,
+            open_with,
+            show_properties,
+            get_thumbnail,
+            describe_path,
+            read_text_preview,
+            record_recent,
+            list_favorites,
+            add_favorite,
+            remove_favorite,
+            list_recents,
+            clear_recents
         ],
     );
     #[cfg(debug_assertions)]
@@ -826,6 +729,7 @@ pub fn run() {
     let specta = configure_specta();
     tauri::Builder::default()
         .manage(ShareState::default())
+        .manage(FileOpsState::default())
         .invoke_handler(specta.invoke_handler())
         .setup(|app| {
             let data_dir = app.path().app_local_data_dir()?;

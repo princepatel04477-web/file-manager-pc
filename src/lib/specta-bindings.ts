@@ -26,20 +26,110 @@ export interface DirectoryListing {
   skipped: number;
 }
 
-export interface DuplicateGroup {
-  fingerprint: string;
+export interface CleanItem {
+  path: string;
+  name: string;
   size: number;
-  files: FileEntry[];
+  modifiedUnix: number | null;
+  daysOld: number | null;
+  isCloud: boolean;
+}
+
+/** A selectable chunk of the Junk card: one junk location, or the Recycle Bin. */
+export interface CleanGroup {
+  id: string;
+  label: string;
+  itemCount: number;
   reclaimableBytes: number;
 }
 
-export interface CleanReport {
-  scannedFiles: number;
-  skipped: number;
-  largeFiles: FileEntry[];
-  duplicateGroups: DuplicateGroup[];
+export type CardAction = "deletePaths" | "deleteJunk" | "emptyRecycleBin" | "uninstall" | "unavailable";
+
+export interface CleanCard {
+  id: string;
+  title: string;
+  description: string;
+  action: CardAction;
+  itemCount: number;
   reclaimableBytes: number;
-  scannedAtUnix: number;
+  groups: CleanGroup[];
+  items: CleanItem[];
+  truncated: boolean;
+  skipped: number;
+  ready: boolean;
+}
+
+export interface RecycleBinInfo {
+  bytes: number;
+  items: number;
+  available: boolean;
+}
+
+export interface UninstallCommand {
+  executable: string;
+  arguments: string[];
+}
+
+export type AppSource = "machine64" | "machine32" | "currentUser";
+
+export interface InstalledApp {
+  name: string;
+  publisher: string;
+  version: string;
+  installDate: string | null;
+  sizeBytes: number;
+  uninstallCommand: UninstallCommand | null;
+  perUser: boolean;
+  source: AppSource;
+}
+
+export interface CleanSummary {
+  cards: CleanCard[];
+  recycleBin: RecycleBinInfo;
+  apps: InstalledApp[];
+  appsBytes: number;
+  indexedFiles: number;
+  generatedAtUnix: number;
+}
+
+export interface JunkDeleteResult {
+  freedBytes: number;
+  deleted: number;
+  skipped: number;
+  cancelled: boolean;
+  errors: string[];
+}
+
+export interface CleanDeleteResult {
+  freedBytes: number;
+  moved: number;
+  skipped: number;
+  cancelled: boolean;
+  errors: string[];
+}
+
+export interface DuplicateFile {
+  path: string;
+  name: string;
+  size: number;
+  modifiedUnix: number | null;
+  /** True for the copy Sift protects by default. */
+  original: boolean;
+}
+
+export interface DuplicateSet {
+  fingerprint: string;
+  size: number;
+  files: DuplicateFile[];
+  reclaimableBytes: number;
+}
+
+export interface DuplicateReport {
+  sets: DuplicateSet[];
+  reclaimableBytes: number;
+  candidates: number;
+  hashed: number;
+  skipped: number;
 }
 
 export interface SearchResults {
@@ -49,9 +139,150 @@ export interface SearchResults {
   truncated: boolean;
 }
 
-export interface TrashResult {
-  moved: number;
+export interface FavoriteItem {
+  path: string;
+  name: string;
+  isDirectory: boolean;
+  addedAtUnix: number;
+}
+
+export interface RecentItem {
+  path: string;
+  name: string;
+  openedAtUnix: number;
+}
+
+export interface FileProperties {
+  name: string;
+  path: string;
+  parent: string;
+  extension: string;
+  kind: string;
+  isDirectory: boolean;
+  isCloudPlaceholder: boolean;
+  isHidden: boolean;
+  size: number;
+  childCount: number | null;
+  modifiedUnix: number | null;
+  createdUnix: number | null;
+  accessedUnix: number | null;
+  drive: string;
+  attributeLabels: string[];
+  favorite: boolean;
+}
+
+export interface TextPreview {
+  path: string;
+  content: string;
+  truncated: boolean;
+  size: number;
+  encoding: string;
+}
+
+export interface Thumbnail {
+  dataUrl: string;
+  key: string;
+  fromCache: boolean;
+}
+
+export type ThumbnailKind = "image" | "video" | "document";
+
+export type ConflictAction = "replace" | "skip" | "keepBoth" | "ask";
+
+export interface ConflictDecision {
+  source: string;
+  action: ConflictAction;
+}
+
+export type PlannedAction = "create" | "replace" | "skip" | "conflict";
+
+export interface PlannedItem {
+  source: string;
+  destination: string;
+  name: string;
+  isDirectory: boolean;
+  size: number;
+  action: PlannedAction;
+}
+
+export interface PlannedConflict {
+  source: string;
+  destination: string;
+  name: string;
+  sourceIsDirectory: boolean;
+  sourceSize: number;
+  sourceModifiedUnix: number | null;
+  existingIsDirectory: boolean;
+  existingSize: number;
+  existingModifiedUnix: number | null;
+}
+
+export type BlockedReason =
+  | "outsideUserFiles"
+  | "missing"
+  | "reparsePoint"
+  | "cloudOnly"
+  | "sameItem"
+  | "insideItself"
+  | "invalidName"
+  | "destinationUnavailable";
+
+export interface BlockedItem {
+  source: string;
+  reason: BlockedReason;
+}
+
+export interface TransferPlan {
+  kind: string;
+  destination: string;
+  items: PlannedItem[];
+  conflicts: PlannedConflict[];
+  blocked: BlockedItem[];
+  bytesTotal: number;
+}
+
+export interface TransferResult {
+  completed: number;
   skipped: number;
+  failed: number;
+  bytes: number;
+  cancelled: boolean;
+  destinations: string[];
+  errors: string[];
+}
+
+export interface RenameOutcome {
+  previousPath: string;
+  newPath: string;
+  replaced: boolean;
+}
+
+export interface DeleteResult {
+  moved: number;
+  movedBytes: number;
+  skipped: number;
+  cancelled: boolean;
+  errors: string[];
+}
+
+export type OpsKind = "copy" | "move" | "rename" | "delete" | "scan" | "clean";
+
+export type OpsState = "running" | "completed" | "cancelled" | "failed";
+
+export interface OperationProgress {
+  jobId: string;
+  kind: OpsKind;
+  state: OpsState;
+  itemsTotal: number;
+  itemsDone: number;
+  itemsSkipped: number;
+  bytesTotal: number;
+  bytesDone: number;
+  current: string;
+  destination: string;
+  startedUnix: number;
+  finishedUnix: number | null;
+  error: string | null;
 }
 
 export interface IndexedEntry {

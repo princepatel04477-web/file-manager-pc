@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { commands, type CleanReport, type DirectoryListing, type HomeLocation, type SearchResults, type TrashResult } from '../lib/bindings';
+import { commands, type DirectoryListing, type HomeLocation, type SearchResults } from '../lib/bindings';
 
 function messageFrom(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -9,25 +9,32 @@ function messageFrom(error: unknown): string {
 
 let searchGeneration = 0;
 
+export interface SelectionOptions {
+  /** Ctrl/Cmd-click: toggle this path without disturbing the rest. */
+  additive?: boolean;
+  /** Shift-click: select everything between the anchor and this path. */
+  range?: boolean;
+  /** The current listing order, used to expand a shift-click range. */
+  order?: string[];
+}
+
 interface AppState {
   locations: HomeLocation[];
   listing: DirectoryListing | null;
-  cleanReport: CleanReport | null;
   searchResults: SearchResults | null;
   selectedPaths: string[];
+  anchorPath: string | null;
   currentPath: string | null;
   loading: boolean;
-  scanning: boolean;
   searching: boolean;
   error: string | null;
   notice: string | null;
   initialize: () => Promise<void>;
   openDirectory: (path: string) => Promise<void>;
-  runScan: () => Promise<void>;
   runSearch: (query: string) => Promise<void>;
-  toggleSelected: (path: string) => void;
+  toggleSelected: (path: string, options?: SelectionOptions) => void;
+  setSelectedPaths: (paths: string[]) => void;
   clearSelection: () => void;
-  moveToRecycleBin: (paths: string[]) => Promise<TrashResult | null>;
   openFile: (path: string) => Promise<void>;
   setNotice: (notice: string | null) => void;
   clearError: () => void;
@@ -36,12 +43,11 @@ interface AppState {
 export const useAppStore = create<AppState>((set, get) => ({
   locations: [],
   listing: null,
-  cleanReport: null,
   searchResults: null,
   selectedPaths: [],
+  anchorPath: null,
   currentPath: null,
   loading: false,
-  scanning: false,
   searching: false,
   error: null,
   notice: null,
@@ -69,17 +75,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ loading: false });
     }
   },
-  runScan: async () => {
-    set({ scanning: true, error: null });
-    try {
-      const cleanReport = await commands.scanStorage();
-      set({ cleanReport });
-    } catch (error: unknown) {
-      set({ error: messageFrom(error) });
-    } finally {
-      set({ scanning: false });
-    }
-  },
   runSearch: async (query) => {
     const generation = ++searchGeneration;
     if (!query.trim()) {
@@ -94,29 +89,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (generation === searchGeneration) set({ error: messageFrom(error), searching: false });
     }
   },
-  toggleSelected: (path) => {
+  toggleSelected: (path, options) => {
     const current = get().selectedPaths;
-    set({ selectedPaths: current.includes(path) ? current.filter((item) => item !== path) : [...current, path] });
-  },
-  clearSelection: () => set({ selectedPaths: [] }),
-  moveToRecycleBin: async (paths) => {
-    if (paths.length === 0) return null;
-    set({ loading: true, error: null });
-    try {
-      const result = await commands.trashPaths(paths);
-      set({ selectedPaths: [], notice: result.moved > 0 ? `${result.moved} item${result.moved === 1 ? '' : 's'} moved to the Recycle Bin.` : null });
-      const currentPath = get().currentPath;
-      if (currentPath) await get().openDirectory(currentPath);
-      const nextReport = get().cleanReport;
-      if (nextReport) set({ cleanReport: null });
-      return result;
-    } catch (error: unknown) {
-      set({ error: messageFrom(error) });
-      return null;
-    } finally {
-      set({ loading: false });
+    const anchor = get().anchorPath;
+    if (options?.range && anchor && options.order) {
+      const from = options.order.indexOf(anchor);
+      const to = options.order.indexOf(path);
+      if (from >= 0 && to >= 0) {
+        const [start, end] = from <= to ? [from, to] : [to, from];
+        set({ selectedPaths: options.order.slice(start, end + 1) });
+        return;
+      }
     }
+    if (options?.additive) {
+      set({
+        selectedPaths: current.includes(path) ? current.filter((item) => item !== path) : [...current, path],
+        anchorPath: path,
+      });
+      return;
+    }
+    set({ selectedPaths: [path], anchorPath: path });
   },
+  setSelectedPaths: (paths) => set({ selectedPaths: paths }),
+  clearSelection: () => set({ selectedPaths: [], anchorPath: null }),
   openFile: async (path) => {
     set({ error: null });
     try {
