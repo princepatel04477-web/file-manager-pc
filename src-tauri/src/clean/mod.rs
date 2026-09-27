@@ -176,7 +176,7 @@ fn junk_card() -> (CleanCard, junk::RecycleBinInfo) {
             reclaimable_bytes: recycle.bytes,
         });
     }
-    groups.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
+    groups.sort_by_key(|group| std::cmp::Reverse(group.reclaimable_bytes));
 
     let item_count = groups.iter().map(|group| group.item_count).sum::<u64>();
     let reclaimable_bytes = groups.iter().map(|group| group.reclaimable_bytes).sum::<u64>();
@@ -579,7 +579,7 @@ mod tests {
         let now = 1_800_000_000;
         let item = item_from(
             &entry("C:\\Users\\me\\Downloads\\old.zip", "old.zip", 4_096, Some(now - 100 * 86_400), false),
-            now,
+            now as u64,
         );
         assert_eq!(item.size, 4_096);
         assert_eq!(item.days_old, Some(100));
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn a_file_from_the_future_is_zero_days_old() {
         let now = 1_800_000_000;
-        let item = item_from(&entry("C:\\Users\\me\\a.bin", "a.bin", 10, Some(now + 500), false), now);
+        let item = item_from(&entry("C:\\Users\\me\\a.bin", "a.bin", 10, Some(now + 500), false), now as u64);
         assert_eq!(item.days_old, Some(0));
     }
 
@@ -603,8 +603,7 @@ mod tests {
 
     #[test]
     fn screenshots_survive_only_the_strict_name_test() {
-        let shots = vec![
-            ScreenshotRow {
+        let shots = [ScreenshotRow {
                 entry: entry("C:\\Users\\me\\Pictures\\Screenshots\\any-name.png", "any-name.png", 100, Some(1), false),
                 inside_folder: true,
             },
@@ -615,8 +614,7 @@ mod tests {
             ScreenshotRow {
                 entry: entry("C:\\Users\\me\\Desktop\\capture-card-driver.zip", "capture-card-driver.zip", 100, Some(1), false),
                 inside_folder: false,
-            },
-        ];
+            }];
         let kept: Vec<&str> = shots
             .iter()
             .filter(|row| rules::is_screenshot_name(&row.entry.name, row.inside_folder))
@@ -648,14 +646,12 @@ mod tests {
 
     #[test]
     fn the_summary_always_contains_the_same_six_cards_in_order() {
-        let cards = vec![
-            empty_card(CARD_JUNK, "Junk files", "", CardAction::DeleteJunk),
+        let cards = [empty_card(CARD_JUNK, "Junk files", "", CardAction::DeleteJunk),
             duplicates_card(),
             empty_card(CARD_LARGE, "Large files", "", CardAction::DeletePaths),
             empty_card(CARD_DOWNLOADS, "Old downloads", "", CardAction::DeletePaths),
             empty_card(CARD_SCREENSHOTS, "Old screenshots", "", CardAction::DeletePaths),
-            empty_card(CARD_APPS, "Unused apps", "", CardAction::Uninstall),
-        ];
+            empty_card(CARD_APPS, "Unused apps", "", CardAction::Uninstall)];
         let ids: Vec<&str> = cards.iter().map(|card| card.id.as_str()).collect();
         assert_eq!(
             ids,

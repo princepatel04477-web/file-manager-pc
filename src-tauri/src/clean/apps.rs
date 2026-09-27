@@ -3,7 +3,7 @@
 //! tested; only the registry reads themselves are Windows-only.
 
 use crate::error::AppError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 
 /// A row straight out of an Uninstall key — before any cleaning or filtering.
@@ -42,7 +42,9 @@ pub struct InstalledApp {
     pub source: AppSource,
 }
 
-#[derive(Clone, Debug, Serialize, Type)]
+// Deserialize as well as Serialize: the frontend hands this straight back to
+// `uninstall_app`, so it must satisfy `CommandArg` on the way in.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallCommand {
     pub executable: String,
@@ -227,8 +229,7 @@ pub fn installed_apps() -> Result<Vec<InstalledApp>, AppError> {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY,
-        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
-        REG_OPTION_NON_VOLATILE, REG_SZ,
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, REG_SZ,
     };
 
     fn to_wide(text: &str) -> Vec<u16> {
@@ -239,7 +240,7 @@ pub fn installed_apps() -> Result<Vec<InstalledApp>, AppError> {
         unsafe {
             let mut handle = HKEY::default();
             let sub_key = to_wide(sub_key);
-            let opened = RegOpenKeyExW(root, PCWSTR(sub_key.as_ptr()), 0, KEY_READ, &mut handle);
+            let opened = RegOpenKeyExW(root, PCWSTR(sub_key.as_ptr()), None, KEY_READ, &mut handle);
             if opened.is_err() {
                 return String::new();
             }
@@ -270,7 +271,7 @@ pub fn installed_apps() -> Result<Vec<InstalledApp>, AppError> {
         unsafe {
             let mut handle = HKEY::default();
             let sub_key = to_wide(sub_key);
-            let opened = RegOpenKeyExW(root, PCWSTR(sub_key.as_ptr()), 0, KEY_READ, &mut handle);
+            let opened = RegOpenKeyExW(root, PCWSTR(sub_key.as_ptr()), None, KEY_READ, &mut handle);
             if opened.is_err() {
                 return 0;
             }
@@ -297,7 +298,7 @@ pub fn installed_apps() -> Result<Vec<InstalledApp>, AppError> {
             let opened = RegOpenKeyExW(
                 root,
                 PCWSTR(wide.as_ptr()),
-                REG_OPTION_NON_VOLATILE.0,
+                None,
                 KEY_READ | flags,
                 &mut handle,
             );
@@ -312,10 +313,11 @@ pub fn installed_apps() -> Result<Vec<InstalledApp>, AppError> {
                 let enumerated = RegEnumKeyExW(
                     handle,
                     index,
-                    PWSTR(buffer.as_mut_ptr()),
+                    Some(PWSTR(buffer.as_mut_ptr())),
                     &mut length,
                     None,
-                    PWSTR::null(),
+                    None,
+                    None,
                     None,
                 );
                 if enumerated.is_err() {
@@ -478,7 +480,6 @@ mod tests {
     fn the_same_app_in_two_hives_appears_once() {
         let sixty_four = to_installed_app(&raw("Blender", "uninstall.exe"));
         let mut thirty_two = to_installed_app(&raw("Blender", "uninstall.exe"));
-        thirty_two.is_64bit = false;
         thirty_two.source = AppSource::Machine32;
         let list = dedupe_and_sort(vec![sixty_four, thirty_two]);
         assert_eq!(list.len(), 1, "the duplicate hive entry is dropped");

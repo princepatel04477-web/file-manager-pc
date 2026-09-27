@@ -255,7 +255,7 @@ fn compose_name(stem: &str, extension: &str, counter: Option<u32>) -> String {
         }
     };
     let mut name = String::with_capacity(body.len() + extension.len());
-    name.push_str(body);
+    name.push_str(&body);
     name.push_str(extension);
     name
 }

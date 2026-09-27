@@ -36,10 +36,9 @@ use specta::Type;
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Component, Path, PathBuf};
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
@@ -120,7 +119,7 @@ fn io_path(path: &Path) -> PathBuf {
         if raw.starts_with(r"\\") {
             return PathBuf::from(format!(r"\\?\UNC\{}", raw.trim_start_matches('\\')));
         }
-        return PathBuf::from(format!(r"\\?\{}", raw));
+        PathBuf::from(format!(r"\\?\{}", raw))
     }
     #[cfg(not(windows))]
     {
@@ -477,7 +476,7 @@ fn search_files_impl(query: String) -> Result<SearchResults, String> {
             entries.push(file_entry(path, metadata));
         }
     });
-    entries.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    entries.sort_by_key(|left| left.name.to_lowercase());
     Ok(SearchResults { entries, scanned, skipped, truncated })
 }
 
@@ -898,7 +897,9 @@ fn discover_pc_shares() -> Result<Vec<NearbyShare>, String> {
                 let Some(file_name) = info.get_property_val_str("file") else { continue; };
                 let device_name = info.get_property_val_str("device").map(share::pc::safe_device_name).unwrap_or_else(|| "Nearby PC".to_owned());
                 let file_size = info.get_property_val_str("size").and_then(|size| size.parse().ok()).unwrap_or(0);
-                let Some(host) = info.get_addresses().iter().next().map(ToString::to_string) else { continue; };
+                // mdns-sd 0.13 exposes the v4 set only; a link-local v6 peer would
+                // need a scope id here anyway, which the download URL cannot carry.
+                let Some(host) = info.get_addresses_v4().into_iter().next().map(ToString::to_string) else { continue; };
                 let id = info.get_fullname().to_owned();
                 found.insert(id.clone(), NearbyShare { id, device_name, file_name: file_name.to_owned(), file_size, host, port: info.get_port(), token: token.to_owned() });
             }

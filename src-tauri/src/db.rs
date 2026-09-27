@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::ops::display_path;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -82,7 +82,9 @@ pub struct RecentItem {
     pub opened_at_unix: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Type)]
+// Deserialize as well as Serialize: this one crosses the IPC boundary inbound as a
+// command argument, which is what `CommandArg` requires.
+#[derive(Clone, Debug, Deserialize, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilter {
     pub query: String,
@@ -504,7 +506,7 @@ impl Database {
         let connection = self.lock()?;
         let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map(
-            rusqlite::params_from_iter(sizes.iter().map(|size| size.min(i64::MAX as u64) as i64)),
+            rusqlite::params_from_iter(sizes.iter().map(|size| (*size).min(i64::MAX as u64) as i64)),
             map_entry,
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)

@@ -62,12 +62,12 @@ pub fn original_index(group: &[&Candidate]) -> usize {
             Some(ordering) => ordering.is_lt(),
             None => path_depth(&candidate.path) < path_depth(&current.path),
         };
-        if better {
-            best = index;
-        } else if by_age.is_none()
+        // With no timestamps to compare and the same depth, the alphabetically
+        // first path wins so the choice is stable between runs.
+        let tie_break = by_age.is_none()
             && path_depth(&candidate.path) == path_depth(&current.path)
-            && candidate.path.to_string_lossy() < current.path.to_string_lossy()
-        {
+            && candidate.path.to_string_lossy() < current.path.to_string_lossy();
+        if better || tie_break {
             best = index;
         }
     }
@@ -214,7 +214,7 @@ pub fn find_duplicates(
             let size = candidates[members[0]].size;
             let group: Vec<&Candidate> = members.iter().map(|index| &candidates[*index]).collect();
             let keep = original_index(&group);
-            let files = group
+            let files: Vec<DuplicateFile> = group
                 .iter()
                 .enumerate()
                 .map(|(index, candidate)| DuplicateFile {
@@ -230,7 +230,7 @@ pub fn find_duplicates(
             report.sets.push(DuplicateSet { fingerprint, size, files, reclaimable_bytes });
         }
     }
-    report.sets.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
+    report.sets.sort_by_key(|set| std::cmp::Reverse(set.reclaimable_bytes));
     report
 }
 
@@ -298,11 +298,9 @@ mod tests {
 
     #[test]
     fn the_oldest_copy_is_the_protected_original() {
-        let group_owned = vec![
-            candidate("/u/copies/newer.bin", 5_000, Some(300)),
+        let group_owned = [candidate("/u/copies/newer.bin", 5_000, Some(300)),
             candidate("/u/original.bin", 5_000, Some(100)),
-            candidate("/u/copies/middle.bin", 5_000, Some(200)),
-        ];
+            candidate("/u/copies/middle.bin", 5_000, Some(200))];
         let group: Vec<&Candidate> = group_owned.iter().collect();
         assert_eq!(original_index(&group), 1);
         assert_eq!(suggested_removals(&group), vec![0, 2]);
@@ -310,17 +308,13 @@ mod tests {
 
     #[test]
     fn ties_are_broken_by_the_shallowest_then_alphabetically_first_path() {
-        let same_age = vec![
-            candidate("/u/z/keep-me.bin", 5_000, Some(100)),
-            candidate("/u/a/other.bin", 5_000, Some(100)),
-        ];
+        let same_age = [candidate("/u/z/keep-me.bin", 5_000, Some(100)),
+            candidate("/u/a/other.bin", 5_000, Some(100))];
         let group: Vec<&Candidate> = same_age.iter().collect();
         assert_eq!(original_index(&group), 0, "same depth, alphabetically first wins");
 
-        let different_depth = vec![
-            candidate("/u/deep/nested/folder/file.bin", 5_000, None),
-            candidate("/u/file.bin", 5_000, None),
-        ];
+        let different_depth = [candidate("/u/deep/nested/folder/file.bin", 5_000, None),
+            candidate("/u/file.bin", 5_000, None)];
         let group: Vec<&Candidate> = different_depth.iter().collect();
         assert_eq!(original_index(&group), 1, "the shallowest copy is the original");
     }

@@ -63,7 +63,7 @@ pub fn get_drive_storage(state: State<'_, IndexState>) -> Result<Vec<DriveStorag
             indexed_size: indexed.get(&drive.to_ascii_lowercase()).copied().unwrap_or(0),
         });
     }
-    output.sort_by(|left, right| left.drive.to_ascii_lowercase().cmp(&right.drive.to_ascii_lowercase()));
+    output.sort_by_key(|left| left.drive.to_ascii_lowercase());
     Ok(output)
 }
 

@@ -291,9 +291,9 @@ pub struct RecycleBinInfo {
 pub fn recycle_bin_info() -> RecycleBinInfo {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRECYCLEBININFO};
-        let mut info = SHQUERYRECYCLEBININFO {
-            cbSize: std::mem::size_of::<SHQUERYRECYCLEBININFO>() as u32,
+        use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+        let mut info = SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
             ..Default::default()
         };
         let queried = unsafe { SHQueryRecycleBinW(windows::core::PCWSTR::null(), &mut info) };
@@ -319,7 +319,7 @@ pub fn empty_recycle_bin() -> Result<(), AppError> {
         if emptied.is_ok() {
             return Ok(());
         }
-        return Err(AppError::Unavailable);
+        Err(AppError::Unavailable)
     }
     #[cfg(not(windows))]
     {
@@ -490,16 +490,16 @@ mod tests {
         fs::write(root.join("keep.txt"), b"not junk by filter").expect("write");
 
         let targets = vec![JunkTarget { id: "user-temp", label: "Temporary files", path: root.clone(), filter: JunkFilter::Prefix("".to_owned()) }];
-        let scan = scan(&targets, &|| false);
-        assert_eq!(scan.groups.len(), 1);
-        assert_eq!(scan.total_items, 3, "every file counts with an empty prefix");
-        assert_eq!(scan.total_bytes, 100 + 40 + 18);
-        assert_eq!(scan.skipped, 0);
+        let everything = scan(&targets, &|| false);
+        assert_eq!(everything.groups.len(), 1);
+        assert_eq!(everything.total_items, 3, "every file counts with an empty prefix");
+        assert_eq!(everything.total_bytes, 100 + 40 + 18);
+        assert_eq!(everything.skipped, 0);
 
         let filtered = vec![JunkTarget { id: "user-temp", label: "Temporary files", path: root.clone(), filter: JunkFilter::Prefix("a.".to_owned()) }];
-        let scan = scan(&filtered, &|| false);
-        assert_eq!(scan.total_items, 1);
-        assert_eq!(scan.total_bytes, 100);
+        let narrowed = scan(&filtered, &|| false);
+        assert_eq!(narrowed.total_items, 1);
+        assert_eq!(narrowed.total_bytes, 100);
 
         let cancelled = scan(&targets, &|| true);
         assert_eq!(cancelled.total_items, 0, "cancelling stops before any folder is read");
