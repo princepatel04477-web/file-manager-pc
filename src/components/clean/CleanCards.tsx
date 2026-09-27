@@ -58,7 +58,16 @@ export function CleanCards({ summary, duplicates, scanning, desktopAvailable, on
               </div>
             </header>
             <div className="clean-card-metric">
-              <strong>{bytes > 0 ? `Free up ${readableSize(bytes)}` : isDuplicates && !scanned ? 'Scan to find out' : 'Nothing to clear'}</strong>
+              <strong>
+                {bytes > 0
+                  ? `Free up ${readableSize(bytes)}`
+                  : isDuplicates && !scanned
+                    ? 'Scan to find out'
+                    // Apps with no EstimatedSize have items but nothing measurable to claim.
+                    : count > 0
+                      ? `${count.toLocaleString()} to review`
+                      : 'Nothing to clear'}
+              </strong>
               <span>{countLabel}</span>
             </div>
             {isDuplicates && !scanned ? (
