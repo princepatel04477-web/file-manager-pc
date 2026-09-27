@@ -36,7 +36,8 @@ import { FileGlyph, readableSize } from './components/FileList';
 import { OperationProgressCard } from './components/OperationProgress';
 import { BrowseRoute } from './routes/BrowseRoute';
 import { CleanRoute } from './routes/CleanRoute';
-import { commands, type FileEntry, type IndexedEntry, type ShareLink } from './lib/bindings';
+import { SharePcPanel } from './share/SharePcPanel';
+import { commands, type FileEntry, type IndexedEntry, type PcShareSession, type ShareLink } from './lib/bindings';
 import { useIndexProgress } from './hooks/useIndexProgress';
 import { useOpsProgress } from './hooks/useOpsProgress';
 import { useAppStore } from './stores/app-store';
@@ -121,6 +122,7 @@ function App() {
     return saved === 'light' || saved === 'dark' ? saved : 'system';
   });
   const [shareLink, setShareLink] = useState<ShareLink | null>(null);
+  const [pcShareSession, setPcShareSession] = useState<PcShareSession | null>(null);
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -363,6 +365,8 @@ function App() {
                     sharing={sharing}
                     shareError={shareError}
                     copied={copied}
+                    pcShareSession={pcShareSession}
+                    onPcShareSessionChange={setPcShareSession}
                     onStart={() => void handleStartShare()}
                     onStop={() => void handleStopShare()}
                     onCopy={() => void handleCopyLink()}
@@ -396,13 +400,15 @@ interface SharePageProps {
   sharing: boolean;
   shareError: string | null;
   copied: boolean;
+  pcShareSession: PcShareSession | null;
+  onPcShareSessionChange: (session: PcShareSession | null) => void;
   onStart: () => void;
   onStop: () => void;
   onCopy: () => void;
   onBrowse: () => void;
 }
 
-function SharePage({ desktopAvailable, selected, selectedCount, onClear, shareLink, sharing, shareError, copied, onStart, onStop, onCopy, onBrowse }: SharePageProps) {
+function SharePage({ desktopAvailable, selected, selectedCount, onClear, shareLink, sharing, shareError, copied, pcShareSession, onPcShareSessionChange, onStart, onStop, onCopy, onBrowse }: SharePageProps) {
   const selectedFile = selected.find((entry) => !entry.isDirectory && !entry.isCloudPlaceholder);
   return (
     <div className="share-page">
@@ -410,6 +416,8 @@ function SharePage({ desktopAvailable, selected, selectedCount, onClear, shareLi
         <div className="share-hero-content"><span className="hero-kicker share-kicker"><Send size={14} /> NEARBY, NOT EVERYWHERE</span><h2>Send a file.<br /><em>Keep it yours.</em></h2><p>Share directly over your local Wi-Fi. No account, no cloud upload, no copy left behind.</p><div className="share-trust"><span><LockKeyhole size={14} /> Private link</span><span><Cloud size={14} /> Local network only</span></div></div>
         <div className="share-art" aria-hidden="true"><div className="share-halo" /><div className="share-device device-back"><span className="device-camera" /><span /><span /><span /></div><div className="share-device device-front"><span className="device-camera" /><div className="share-check"><Check size={19} /></div><b>Sent!</b><i /></div><span className="share-art-dot dot-a" /><span className="share-art-dot dot-b" /><span className="share-art-star">✳</span></div>
       </section>
+
+      <SharePcPanel desktopAvailable={desktopAvailable} selected={selected} session={pcShareSession} onSessionChange={onPcShareSessionChange} />
 
       {!shareLink ? (
         <section className="share-content-card">
@@ -422,14 +430,14 @@ function SharePage({ desktopAvailable, selected, selectedCount, onClear, shareLi
             <div className="share-empty-selection"><div className="select-file-icon"><FolderOpen size={19} /></div><div><strong>{selectedCount > 0 ? 'Choose a file, not a folder' : 'No file selected'}</strong><p>Go to Browse, select one downloaded file, then come back here.</p></div><button type="button" className="text-button" onClick={onBrowse}>Go to Browse <ChevronRight size={14} /></button></div>
           )}
           {shareError && <div className="inline-error"><XCircle size={15} />{shareError}</div>}
-          {desktopAvailable && <div className="share-action-row"><span><ShieldCheck size={15} /> Link expires automatically after 20 minutes.</span><button type="button" className="primary-button" onClick={onStart} disabled={!selectedFile || sharing}>{sharing ? <span className="button-spinner" /> : <Send size={16} />}{sharing ? 'Preparing secure link…' : 'Create sharing link'}<ArrowUpRight size={15} /></button></div>}
+          {desktopAvailable && <div className="share-action-row"><span><ShieldCheck size={15} /> Link expires automatically after 10 minutes.</span><button type="button" className="primary-button" onClick={onStart} disabled={!selectedFile || sharing}>{sharing ? <span className="button-spinner" /> : <Send size={16} />}{sharing ? 'Preparing secure link…' : 'Create sharing link'}<ArrowUpRight size={15} /></button></div>}
         </section>
       ) : (
         <section className="share-active-card">
-          <div className="share-active-heading"><div><span className="active-share-badge"><span /> SHARING NOW</span><h3>Ready for a nearby device</h3><p>Keep both devices on the same Wi-Fi. The link stops working in 20 minutes.</p></div><button className="icon-button" type="button" aria-label="Stop sharing" title="Stop sharing" onClick={onStop}><X size={17} /></button></div>
+          <div className="share-active-heading"><div><span className="active-share-badge"><span /> SHARING NOW</span><h3>Ready for a nearby device</h3><p>Keep both devices on the same Wi-Fi. The link stops working in 10 minutes.</p></div><button className="icon-button" type="button" aria-label="Stop sharing" title="Stop sharing" onClick={onStop}><X size={17} /></button></div>
           <div className="active-share-grid">
             <div className="qr-panel"><div className="qr-frame" dangerouslySetInnerHTML={{ __html: shareLink.qrSvg }} /><span>Scan with your phone camera</span></div>
-            <div className="share-link-details"><div className="share-file-chip"><FileGlyph entry={selectedFile ?? { name: shareLink.fileName, path: '', extension: '', kind: 'file', isDirectory: false, isCloudPlaceholder: false, size: 0, modifiedUnix: null }} /><div><strong>{shareLink.fileName}</strong><small>Only this file is shared</small></div></div><label className="link-label">PRIVATE LINK</label><div className="link-copy-row"><input readOnly value={shareLink.url} aria-label="Private sharing link" onFocus={(event) => event.currentTarget.select()} /><button type="button" onClick={onCopy} aria-label="Copy link" title="Copy link">{copied ? <Check size={16} /> : <Copy size={16} />}</button></div><span className="link-expiry"><span /> Available for 20 minutes · On your local network</span></div>
+            <div className="share-link-details"><div className="share-file-chip"><FileGlyph entry={selectedFile ?? { name: shareLink.fileName, path: '', extension: '', kind: 'file', isDirectory: false, isCloudPlaceholder: false, size: 0, modifiedUnix: null }} /><div><strong>{shareLink.fileName}</strong><small>Only this file is shared</small></div></div><label className="link-label">PRIVATE LINK</label><div className="link-copy-row"><input readOnly value={shareLink.url} aria-label="Private sharing link" onFocus={(event) => event.currentTarget.select()} /><button type="button" onClick={onCopy} aria-label="Copy link" title="Copy link">{copied ? <Check size={16} /> : <Copy size={16} />}</button></div><span className="link-expiry"><span /> Available for 10 minutes · On your local network</span></div>
           </div>
           <div className="share-security-note"><LockKeyhole size={15} /><span>Anyone with this private link on your network can download the file. Sharing stops when you stop it, close Sift, or the timer ends.</span><button type="button" className="stop-share-button" onClick={onStop}>Stop sharing</button></div>
         </section>

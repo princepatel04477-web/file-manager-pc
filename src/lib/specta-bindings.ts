@@ -349,3 +349,21 @@ export interface ShareLink {
   fileName: string;
   expiresInSeconds: number;
 }
+
+export interface NearbyShare {
+  id: string;
+  deviceName: string;
+  fileName: string;
+  fileSize: number;
+  host: string;
+  port: number;
+  token: string;
+}
+
+export interface PcShareSession {
+  deviceName: string;
+  fileName: string;
+  fileSize: number;
+  pairingCode: string;
+  expiresInSeconds: number;
+}

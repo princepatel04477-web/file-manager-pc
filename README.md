@@ -16,7 +16,7 @@ Sift is a privacy-first Windows file manager inspired by the three-part navigati
   - *Large files* (100 MB+), *old downloads* (untouched for 90 days) and *old screenshots* (`Pictures\Screenshots` plus capture-style names) come straight from the SQLite index, so the cards open instantly.
   - *Unused apps* reads the `HKLM` and `HKCU` Uninstall keys (including `WOW6432Node`), hides system components and patches, and launches each app's own uninstaller.
 - **Recycle Bin:** selected items are passed to the platform Recycle Bin through the `trash` crate; Sift does not permanently delete user files.
-- **Share:** create a random-token, local-network download link and QR code for one selected, locally available file. The link is limited to that file, expires after 20 minutes, and can be stopped early.
+- **Share:** send PC-to-PC over mDNS (`_sift._tcp`) and a temporary axum HTTP server, or share to a phone browser with a random-token QR link. PC receivers discover nearby senders, enter the six-digit pairing code shown on the sender, and download with byte-range retries if the connection drops. Progress is shown at the sender and receiver. Phone links are limited to one selected local file, expire after 10 minutes, and can be stopped early. Sharing stays on the local network; no cloud service is involved.
 - **Desktop shell:** custom draggable titlebar, minimize/maximize/close controls, keyboard-accessible OS window snapping, light/dark/system appearance, responsive navigation, reduced-motion support, and virtualized long lists.
 
 The browser preview intentionally shows no fabricated file records and cannot read local files. Real filesystem features are available in the Windows desktop build.
