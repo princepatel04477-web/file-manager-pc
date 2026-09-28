@@ -378,8 +378,9 @@ mod autostart {
                     PCWSTR(name.as_ptr()),
                     None,
                     REG_SZ,
+                    // The slice carries its own length in windows 0.61; passing the
+                    // byte count separately is the old signature.
                     Some(bytes),
-                    bytes.len() as u32,
                 )
             });
             match result {
