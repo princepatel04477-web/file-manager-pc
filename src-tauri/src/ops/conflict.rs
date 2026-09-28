@@ -379,7 +379,14 @@ pub fn plan_transfer(
             continue;
         }
         if meta.is_directory && is_within_or_equal(destination_dir, source) {
-            plan.blocked.push(BlockedItem { source: source_text, reason: BlockedReason::InsideItself });
+            // Dropping a folder onto itself is a no-op worth naming plainly; only a
+            // destination strictly inside the source is a containment error.
+            let reason = if crate::ops::same_path(destination_dir, source) {
+                BlockedReason::SameItem
+            } else {
+                BlockedReason::InsideItself
+            };
+            plan.blocked.push(BlockedItem { source: source_text, reason });
             continue;
         }
 
@@ -654,7 +661,9 @@ mod tests {
             .dir("/home/u/pics")
             .file("/home/u/docs/report.pdf", 1_024)
             .file("/home/u/pics/report.pdf", 2_048)
-            .file("/home/u/pics/notes.txt", 12);
+            // notes.txt lives beside the source and has no twin at the destination,
+            // which is what makes it the non-colliding case this test checks.
+            .file("/home/u/docs/notes.txt", 12);
         let plan = plan_transfer(
             TransferKind::Copy,
             &[path("/home/u/docs/report.pdf"), path("/home/u/docs/notes.txt")],
@@ -799,7 +808,9 @@ mod tests {
 
     #[test]
     fn missing_sources_and_unusable_destinations_are_reported_not_fatal() {
-        let fs = FakeFs::new().dir("/dst").file("/src/gone.txt", 1);
+        // gone.txt is deliberately absent: the point is that a source which is not
+        // there is reported rather than panicking the plan.
+        let fs = FakeFs::new().dir("/dst");
         let plan = plan_transfer(
             TransferKind::Copy,
             &[path("/src/gone.txt")],

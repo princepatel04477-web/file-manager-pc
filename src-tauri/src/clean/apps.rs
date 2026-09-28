@@ -101,19 +101,26 @@ pub fn is_hidden(app: &RawApp) -> bool {
 /// `20260924` → `2026-09-24`. Anything else is `None` rather than a guess.
 pub fn parse_install_date(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    let digits: String = trimmed.chars().filter(char::is_ascii_digit).collect();
-    if digits.len() == 8 {
-        let year = &digits[0..4];
-        let month = &digits[4..6];
-        let day = &digits[6..8];
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Read yyyymmdd off the value itself rather than off its digits with the
+    // separators removed: "12/05/2025" also has eight digits, and stripping the
+    // slashes turned it into month 20 of the year 1205 and threw it away.
+    if trimmed.chars().all(|character| character.is_ascii_digit()) {
+        // `InstallDate` is documented as yyyymmdd, so a digit run of any other
+        // length is a malformed value rather than a date in some other notation.
+        if trimmed.len() != 8 {
+            return None;
+        }
+        let year = &trimmed[0..4];
+        let month = &trimmed[4..6];
+        let day = &trimmed[6..8];
         let month_value: u32 = month.parse().ok()?;
         let day_value: u32 = day.parse().ok()?;
         if (1..=12).contains(&month_value) && (1..=31).contains(&day_value) {
             return Some(format!("{year}-{month}-{day}"));
         }
-        return None;
-    }
-    if trimmed.is_empty() {
         return None;
     }
     // Some entries store a locale-formatted date; pass it through untouched.

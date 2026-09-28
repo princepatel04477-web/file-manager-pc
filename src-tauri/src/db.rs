@@ -109,7 +109,10 @@ impl Database {
             std::fs::create_dir_all(crate::ops::io_path(parent))?;
         }
         let connection = Connection::open(crate::ops::io_path(path))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        // `PRAGMA journal_mode` answers with the mode it settled on, and rusqlite's
+        // `execute` path rejects a statement that returns rows, so read the answer.
+        let _: String =
+            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
         connection.execute_batch(

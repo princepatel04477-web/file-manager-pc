@@ -43,15 +43,20 @@ pub fn screenshot_folder(pictures: &Path) -> PathBuf {
     pictures.join("Screenshots")
 }
 
-const SCREENSHOT_PREFIXES: [&str; 7] = [
+const SCREENSHOT_PREFIXES: [&str; 6] = [
     "screenshot",
     "screen shot",
     "screen-shot",
     "screen_shot",
     "snipping",
     "snip ",
-    "capture",
 ];
+
+/// "Capture" is an ordinary English word, so beginning with it is not evidence on
+/// its own. It counts only when what follows is a counter or a timestamp rather
+/// than more words: `Capture.png` and `Capture 001.png` are screenshots,
+/// `capture-card-driver.zip` and `captured-value.json` are not.
+const AMBIGUOUS_PREFIXES: [&str; 1] = ["capture"];
 
 /// Windows screenshot names: `Screenshot (3).png`, `Screenshot 2024-01-01 120000.png`,
 /// `Snipping Tool 2024...`, `Capture.PNG`. Anything inside `Pictures\Screenshots`
@@ -65,7 +70,15 @@ pub fn is_screenshot_name(name: &str, inside_screenshot_folder: bool) -> bool {
         .map(|(stem, _)| stem)
         .unwrap_or(name)
         .to_ascii_lowercase();
-    SCREENSHOT_PREFIXES.iter().any(|prefix| stem.starts_with(prefix))
+    if SCREENSHOT_PREFIXES.iter().any(|prefix| stem.starts_with(prefix)) {
+        return true;
+    }
+    AMBIGUOUS_PREFIXES.iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let rest = rest.trim_start_matches([' ', '-', '_', '(', '.']);
+            rest.is_empty() || rest.starts_with(|character: char| character.is_ascii_digit())
+        })
+    })
 }
 
 /// Days between two unix timestamps, floored; used for "93 days old" labels.
