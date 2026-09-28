@@ -99,6 +99,11 @@ pub struct SearchFilter {
 /// How many recent files are kept.
 pub const MAX_RECENTS: u32 = 40;
 
+/// Bumped whenever a change alters what belongs in the index, so an existing
+/// index built under the old rules is rebuilt rather than reconciled.
+/// 2: AppData and the tool caches are no longer indexed.
+const INDEX_VERSION: &str = "2";
+
 pub struct Database {
     connection: Mutex<Connection>,
 }
@@ -115,6 +120,33 @@ impl Database {
             connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
+
+        // The settings table has to exist before the index version can be read;
+        // the batch below recreates it harmlessly either way.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )?;
+        let stored: Option<String> = connection
+            .query_row("SELECT value FROM settings WHERE key = 'index_version'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let stale = stored.as_deref() != Some(INDEX_VERSION);
+        if stale {
+            // What counts as worth indexing changed, so every row written under the
+            // old rules is suspect. Walking an old index row by row to reconcile it
+            // takes far longer than building a fresh one — on a profile that had
+            // been indexed a few times it meant reading 1.8 million stale rows out
+            // of a 1.3 GB file before the app was useful — so start clean instead.
+            connection.execute_batch(
+                "DROP TRIGGER IF EXISTS files_ai;
+                 DROP TRIGGER IF EXISTS files_ad;
+                 DROP TRIGGER IF EXISTS files_au;
+                 DROP TABLE IF EXISTS files_fts;
+                 DROP TABLE IF EXISTS files;",
+            )?;
+        }
+
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS files (
@@ -173,6 +205,19 @@ impl Database {
                  INSERT INTO files_fts(rowid, name) VALUES (new.id, new.name);
              END;",
         )?;
+
+        if stale {
+            connection.execute(
+                "INSERT INTO settings (key, value) VALUES ('index_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [INDEX_VERSION],
+            )?;
+            // Deliberately no VACUUM here. `open` runs inside Tauri's setup hook on
+            // the main thread, and rewriting a 1.3 GB file there held the window
+            // for fifteen seconds — the very symptom this change exists to remove.
+            // Dropping the tables leaves the pages on the free list, and the vacuum
+            // at the end of the first scan reclaims them from the indexer thread.
+        }
         Ok(Self { connection: Mutex::new(connection) })
     }
 

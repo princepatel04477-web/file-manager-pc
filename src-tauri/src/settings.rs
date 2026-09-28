@@ -93,10 +93,15 @@ fn normalize_theme(value: Option<String>) -> String {
 
 fn normalize_schedule(value: Option<String>) -> String {
     match value.as_deref() {
-        Some(SCHEDULE_DAILY) => SCHEDULE_DAILY.to_owned(),
+        Some(SCHEDULE_ON_LAUNCH) => SCHEDULE_ON_LAUNCH.to_owned(),
         Some(SCHEDULE_WEEKLY) => SCHEDULE_WEEKLY.to_owned(),
         Some(SCHEDULE_MANUAL) => SCHEDULE_MANUAL.to_owned(),
-        _ => SCHEDULE_ON_LAUNCH.to_owned(),
+        // Daily rather than every launch. A profile of a few hundred thousand
+        // files takes minutes to walk, and doing it on every open made the app
+        // feel broken on exactly the launches people notice. Between scans the
+        // roots are watched recursively, so changes still land immediately; a
+        // profile that has never been scanned still scans straight away.
+        _ => SCHEDULE_DAILY.to_owned(),
     }
 }
 
