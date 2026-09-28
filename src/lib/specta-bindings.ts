@@ -367,3 +367,36 @@ export interface PcShareSession {
   pairingCode: string;
   expiresInSeconds: number;
 }
+
+/** A folder Sift will not index, search, or show as a result. */
+export interface Exclusion {
+  path: string;
+  label: string;
+  addedAtUnix: number;
+}
+
+/** A folder the indexer passed over, and why. */
+export interface SkippedFolder {
+  path: string;
+  reason: string;
+}
+
+/** What the Settings screen reads and writes. */
+export interface Settings {
+  theme: string;
+  startWithWindows: boolean;
+  scanSchedule: string;
+  lastScanUnix: number | null;
+  nextScanUnix: number | null;
+  exclusions: Exclusion[];
+}
+
+/** The two caches Settings can inspect and clear. */
+export interface CacheReport {
+  thumbnailCachePath: string;
+  thumbnailCacheBytes: number;
+  thumbnailCacheFiles: number;
+  skippedFolders: SkippedFolder[];
+  skippedFoldersTruncated: boolean;
+  skippedTotal: number;
+}

@@ -152,6 +152,15 @@ impl Database {
                  opened_at INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS idx_recents_opened ON recents(opened_at DESC);
+             CREATE TABLE IF NOT EXISTS settings (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS exclusions (
+                 path TEXT PRIMARY KEY COLLATE NOCASE,
+                 label TEXT NOT NULL,
+                 added_at INTEGER NOT NULL DEFAULT 0
+             );
              CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name, content='files', content_rowid='id', tokenize='unicode61');
              CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
                  INSERT INTO files_fts(rowid, name) VALUES (new.id, new.name);
@@ -371,6 +380,53 @@ impl Database {
 
     pub fn clear_recents(&self) -> Result<(), AppError> {
         self.lock()?.execute("DELETE FROM recents", [])?;
+        Ok(())
+    }
+
+    /// One persisted preference, or `None` when it has never been set. A missing
+    /// value always falls back to the built-in default, never to a guess.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, AppError> {
+        let connection = self.lock()?;
+        connection
+            .query_row::<String, _, _>("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), AppError> {
+        self.lock()?.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Folders the user has excluded from the index, newest first.
+    pub fn exclusions(&self) -> Result<Vec<(String, String, i64)>, AppError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT path, label, added_at FROM exclusions ORDER BY added_at DESC, path COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// Excluding a folder twice only refreshes its label.
+    pub fn add_exclusion(&self, path: &str, label: &str, added_at: i64) -> Result<(), AppError> {
+        self.lock()?.execute(
+            "INSERT INTO exclusions (path, label, added_at) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET label=excluded.label",
+            params![path, label, added_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_exclusion(&self, path: &str) -> Result<(), AppError> {
+        self.lock()?
+            .execute("DELETE FROM exclusions WHERE path = ?1", [path])?;
         Ok(())
     }
 

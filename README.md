@@ -17,6 +17,11 @@ Sift is a privacy-first Windows file manager inspired by the three-part navigati
   - *Unused apps* reads the `HKLM` and `HKCU` Uninstall keys (including `WOW6432Node`), hides system components and patches, and launches each app's own uninstaller.
 - **Recycle Bin:** selected items are passed to the platform Recycle Bin through the `trash` crate; Sift does not permanently delete user files.
 - **Share:** send PC-to-PC over mDNS (`_sift._tcp`) and a temporary axum HTTP server, or share to a phone browser with a random-token QR link. PC receivers discover nearby senders, enter the six-digit pairing code shown on the sender, and download with byte-range retries if the connection drops. Progress is shown at the sender and receiver. Phone links are limited to one selected local file, expire after 10 minutes, and can be stopped early. Sharing stays on the local network; no cloud service is involved.
+- **Settings:** an editable exclusion list, appearance (system/light/dark), start with Windows, the scan schedule, and a view of the two caches Sift keeps.
+  - *Excluded folders* are validated against the same user-profile boundary as every other command, so only real folders inside your own profile can be excluded, and never a shortcut or link. Adding one drops whatever the index already holds for it, so it disappears from Browse straight away. The indexer, the file watcher, and the folder listing all consult the list.
+  - *Start with Windows* is a per-user Run key written through the Windows API, never a registry hive Sift would need administrator rights for. Sift reads the entry back rather than trusting what it wrote, and if Windows refuses the change it says so and points at Task Manager instead of pretending it worked.
+  - *Scan schedule* chooses between a full scan at every launch (the default), once a day, once a week, or never automatically. Between full scans Sift still watches the top-level known folders, and the screen shows when the last scan ran and when the next one is due.
+  - *Caches* reports and clears the thumbnail cache and the folders the last scan passed over, with the reason for each. Windows denies access to some user folders more often than anything else, so the list says "Sift needs permission to read this folder" rather than counting them in silence.
 - **Desktop shell:** custom draggable titlebar, minimize/maximize/close controls, keyboard-accessible OS window snapping, light/dark/system appearance, responsive navigation, reduced-motion support, and virtualized long lists.
 
 The browser preview intentionally shows no fabricated file records and cannot read local files. Real filesystem features are available in the Windows desktop build.
@@ -50,8 +55,9 @@ exclusion, cancellation), the progress/cancellation registry, the PNG encoder us
 the thumbnail cache, the favourites/recents tables, and the Clean rules: junk path
 resolution against a fake environment, duplicate size grouping, the original-copy
 choice, the preview/full hash split over real temporary files, and Uninstall-key
-parsing. `.github/workflows/ci.yml` runs `tsc`, `vite build`, `vitest`, `cargo clippy`,
-and `cargo test` on every push.
+parsing. There is no CI workflow in this repository, so run `npm test`,
+`npm run check:bindings`, `npm run check:sql`, and the two cargo commands yourself
+before opening a pull request.
 
 Two checks exist because `tsc` cannot see Rust: `npm run check:bindings` walks the types
 reachable from the registered commands and compares their serde field names with
@@ -59,6 +65,35 @@ reachable from the registered commands and compares their serde field names with
 `src-tauri/src/db.rs` and runs them against a real SQLite database.
 
 The desktop window uses undecorated chrome; the window controls are implemented in Sift. Windows keyboard snapping (for example, **Win+Left/Right**) remains available.
+
+## Building the installer
+
+`npm run tauri build` produces an NSIS installer in `src-tauri/target/release/bundle/nsis/`.
+
+The bundle is configured in `src-tauri/tauri.conf.json`:
+
+- `installMode: "currentUser"` installs into the current user's own profile and never asks for administrator rights, which is the same rule the rest of the app follows. The app's undecorated window and its own titlebar are unaffected by the installer; they come from `app.windows[0].decorations`, not from the bundle.
+- `bundle.targets` is `["nsis"]`. Adding `"msi"` also builds a WiX package, which needs the [WiX Toolset](https://wixtoolset.org/) installed and `bundle.windows.wix` configured.
+- `bundle.icon` points at the full Windows icon set: `32x32.png`, `128x128.png`, `128x128@2x.png`, and a multi-resolution `icon.ico` (16 through 256), which is also the installer's own icon. The artwork is `src-tauri/icons/sift-icon.svg`; regenerate the rest from it with `npm run tauri icon src-tauri/icons/sift-icon.svg`.
+
+### Automatic updates
+
+The updater is configured but **not enabled in the build**: `bundle.createUpdaterArtifacts`
+is `false`, so `npm run tauri build` works without any signing key. To ship updates:
+
+1. Generate a signing key once and keep the private half offline:
+   `npm run tauri signer generate -w ~/.tauri/sift.key`.
+2. Put the printed **public** key in `plugins.updater.pubkey` (it is a key, not a file
+   path) and point `plugins.updater.endpoints` at a server that answers `204` when
+   there is nothing newer, or a static `latest.json`.
+3. Set `"createUpdaterArtifacts": true` in `bundle`, export `TAURI_SIGNING_PRIVATE_KEY`
+   (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if you used one) in the shell, and build
+   again. The build now also writes `Sift_0.1.0_x64-setup.exe.sig` next to the
+   installer. **A public key with no private key in the environment fails the build**,
+   which is why the default is `false`.
+4. Add the plugin itself with `npm run tauri add updater`. It is deliberately not in
+   `Cargo.toml` yet: without a real endpoint and a matching key pair, the plugin would
+   only add a failing network call to an app that otherwise works offline.
 
 ## Filesystem safety
 

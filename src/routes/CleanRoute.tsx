@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowUpRight, Check, LockKeyhole, RefreshCcw, Sparkles, X, XCircle } from 'lucide-react';
+import { ArrowUpRight, Check, FolderX, LockKeyhole, RefreshCcw, Sparkles, X, XCircle } from 'lucide-react';
 import { CleanCards } from '../components/clean/CleanCards';
 import { ConfirmCleanSheet, type ConfirmRequest } from '../components/clean/ConfirmCleanSheet';
 import { FreedResult } from '../components/clean/FreedResult';
@@ -8,10 +8,12 @@ import { totalReclaimable, useCleanStore } from '../stores/clean-store';
 
 interface CleanRouteProps {
   desktopAvailable: boolean;
+  /** Takes the user to the skipped-folder list, where the exclusions live too. */
+  onOpenSettings: () => void;
 }
 
 /** The Clean tab: six cards, a confirm sheet for every removal, and the result banner. */
-export function CleanRoute({ desktopAvailable }: CleanRouteProps) {
+export function CleanRoute({ desktopAvailable, onOpenSettings }: CleanRouteProps) {
   const summary = useCleanStore((state) => state.summary);
   const loading = useCleanStore((state) => state.loading);
   const scanning = useCleanStore((state) => state.scanning);
@@ -42,6 +44,9 @@ export function CleanRoute({ desktopAvailable }: CleanRouteProps) {
 
   const reclaimable = totalReclaimable(summary, duplicates);
   const reviewed = summary?.indexedFiles ?? 0;
+  // Entries the walk could not read at all. Windows keeps these away from the
+  // current user more often than anything else, so say so rather than hiding it.
+  const unreadable = summary?.cards.reduce((total, card) => total + card.skipped, 0) ?? 0;
 
   return (
     <div className="clean-page">
@@ -102,6 +107,17 @@ export function CleanRoute({ desktopAvailable }: CleanRouteProps) {
         <div className="clean-loading" role="status">
           {loading ? <span className="button-spinner" /> : null}
           <span>{loading ? 'Measuring what can be cleaned…' : 'Connect the Windows app to review your storage.'}</span>
+        </div>
+      )}
+
+      {unreadable > 0 && (
+        <div className="permission-note" role="status">
+          <FolderX size={15} />
+          <span>
+            {unreadable.toLocaleString()} item{unreadable === 1 ? '' : 's'} could not be read, usually because Windows will not give Sift
+            permission. Nothing was changed; the rest of the numbers are still accurate.
+          </span>
+          <button type="button" className="text-button" onClick={onOpenSettings}>See the list</button>
         </div>
       )}
 

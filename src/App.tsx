@@ -23,6 +23,7 @@ import {
   Moon,
   Search,
   Send,
+  Settings2,
   ShieldCheck,
   Sparkles,
   Star,
@@ -37,20 +38,22 @@ import { OperationProgressCard } from './components/OperationProgress';
 import { BrowseRoute } from './routes/BrowseRoute';
 import { CleanRoute } from './routes/CleanRoute';
 import { SharePcPanel } from './share/SharePcPanel';
+import { SettingsRoute } from './routes/SettingsRoute';
 import { commands, type FileEntry, type IndexedEntry, type PcShareSession, type ShareLink } from './lib/bindings';
 import { useIndexProgress } from './hooks/useIndexProgress';
 import { useOpsProgress } from './hooks/useOpsProgress';
 import { useAppStore } from './stores/app-store';
 import { useIndexStore } from './stores/index-store';
 import { useOpsStore } from './stores/ops-store';
+import { useSettingsStore, type ThemeMode } from './stores/settings-store';
 
-type Tab = 'clean' | 'browse' | 'share';
-type ThemeMode = 'system' | 'light' | 'dark';
+type Tab = 'clean' | 'browse' | 'share' | 'settings';
 
 const tabCopy: Record<Tab, { title: string; subtitle: string }> = {
   clean: { title: 'Clean', subtitle: 'A little more room for what matters.' },
   browse: { title: 'Browse', subtitle: 'Everything in its place.' },
   share: { title: 'Share', subtitle: 'Send files, simply and privately.' },
+  settings: { title: 'Settings', subtitle: 'Tune Sift to this PC.' },
 };
 
 function SkeletonPanel() {
@@ -117,10 +120,9 @@ function App() {
   const [tab, setTab] = useState<Tab>('clean');
   const [query, setQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [theme, setTheme] = useState<ThemeMode>(() => {
-    const saved = window.localStorage.getItem('sift-theme');
-    return saved === 'light' || saved === 'dark' ? saved : 'system';
-  });
+  const theme = useSettingsStore((state) => state.theme);
+  const chooseTheme = useSettingsStore((state) => state.chooseTheme);
+  const loadSettings = useSettingsStore((state) => state.load);
   const [shareLink, setShareLink] = useState<ShareLink | null>(null);
   const [pcShareSession, setPcShareSession] = useState<PcShareSession | null>(null);
   const [sharing, setSharing] = useState(false);
@@ -134,8 +136,9 @@ function App() {
       void initializeIndex();
       void loadFavorites();
       void loadRecents();
+      void loadSettings();
     }
-  }, [desktopAvailable, initialize, initializeIndex, loadFavorites, loadRecents]);
+  }, [desktopAvailable, initialize, initializeIndex, loadFavorites, loadRecents, loadSettings]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -146,7 +149,6 @@ function App() {
     };
     applyTheme();
     media.addEventListener('change', applyTheme);
-    window.localStorage.setItem('sift-theme', theme);
     return () => media.removeEventListener('change', applyTheme);
   }, [theme]);
 
@@ -240,7 +242,9 @@ function App() {
   }
 
   function cycleTheme() {
-    setTheme((value) => value === 'system' ? 'light' : value === 'light' ? 'dark' : 'system');
+    const order: ThemeMode[] = ['system', 'light', 'dark'];
+    const next = order[(order.indexOf(theme) + 1) % order.length] ?? 'system';
+    void chooseTheme(next);
   }
 
   return (
@@ -271,6 +275,7 @@ function App() {
             <button type="button" className={`nav-item${tab === 'clean' ? ' active' : ''}`} onClick={() => setTab('clean')}><Sparkles size={18} /><span>Clean</span></button>
             <button type="button" className={`nav-item${tab === 'browse' ? ' active' : ''}`} onClick={() => setTab('browse')}><FolderOpen size={18} /><span>Browse</span></button>
             <button type="button" className={`nav-item${tab === 'share' ? ' active' : ''}`} onClick={() => setTab('share')}><Send size={18} /><span>Share</span></button>
+            <button type="button" className={`nav-item nav-item-secondary${tab === 'settings' ? ' active' : ''}`} onClick={() => setTab('settings')}><Settings2 size={18} /><span>Settings</span></button>
           </nav>
 
           <div className="sidebar-divider" />
@@ -330,7 +335,7 @@ function App() {
                 <input ref={searchInputRef} value={query} onChange={(event) => { setQuery(event.target.value); if (event.target.value) setTab('browse'); }} placeholder="Search your files" aria-label="Search your files" />
                 {query ? <button type="button" aria-label="Clear search" onClick={() => setQuery('')}><X size={14} /></button> : <kbd>Ctrl K</kbd>}
               </label>
-              {selectedPaths.length > 0 && tab !== 'share' && <button type="button" className="toolbar-button danger-button" onClick={() => void handleTrash()} disabled={!desktopAvailable || loading}><Trash2 size={16} /><span>Recycle</span><b>{selectedPaths.length}</b></button>}
+              {selectedPaths.length > 0 && tab !== 'share' && tab !== 'settings' && <button type="button" className="toolbar-button danger-button" onClick={() => void handleTrash()} disabled={!desktopAvailable || loading}><Trash2 size={16} /><span>Recycle</span><b>{selectedPaths.length}</b></button>}
               <div className="avatar-button" aria-label="Current Windows user" title="Your Windows profile"><CircleUserRound size={18} /></div>
             </div>
           </div>
@@ -343,18 +348,21 @@ function App() {
             <AnimatePresence mode="wait" initial={false}>
               <motion.section key={tab} className="page-content" initial={{ opacity: 0, y: reducedMotion ? 0 : 7 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: reducedMotion ? 0 : -5 }} transition={pageMotion}>
                 <div className="section-intro"><p>{tabCopy[tab].subtitle}</p>{tab === 'browse' && currentLocation && <span className="current-location"><Folder size={14} />{currentLocation.label}</span>}</div>
-                {tab === 'browse' ? (
+                {tab === 'settings' ? (
+                  <SettingsRoute desktopAvailable={desktopAvailable} />
+                ) : tab === 'browse' ? (
                   <BrowseRoute
                     desktopAvailable={desktopAvailable}
                     query={query}
                     onQueryChange={setQuery}
+                    onOpenSettings={() => setTab('settings')}
                     onShareRequest={(entry) => {
                       setSelectedPaths([entry.path]);
                       setTab('share');
                     }}
                   />
                 ) : loading && !desktopAvailable ? <SkeletonPanel /> : tab === 'clean' ? (
-                  <CleanRoute desktopAvailable={desktopAvailable} />
+                  <CleanRoute desktopAvailable={desktopAvailable} onOpenSettings={() => setTab('settings')} />
                 ) : (
                   <SharePage
                     desktopAvailable={desktopAvailable}
@@ -384,6 +392,7 @@ function App() {
         <button type="button" className={tab === 'clean' ? 'active' : ''} onClick={() => setTab('clean')}><Sparkles size={19} /><span>Clean</span></button>
         <button type="button" className={tab === 'browse' ? 'active' : ''} onClick={() => setTab('browse')}><FolderOpen size={19} /><span>Browse</span></button>
         <button type="button" className={tab === 'share' ? 'active' : ''} onClick={() => setTab('share')}><Send size={19} /><span>Share</span></button>
+        <button type="button" className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}><Settings2 size={19} /><span>Settings</span></button>
       </nav>
 
       <OperationProgressCard operations={operations} onCancel={(jobId) => void cancelOperation(jobId)} />
