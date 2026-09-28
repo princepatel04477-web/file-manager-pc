@@ -200,6 +200,9 @@ fn run_indexer(app: AppHandle, state: IndexState) {
             if !drives.iter().any(|drive| ops::drive_for(root).eq_ignore_ascii_case(&drive.label)) {
                 increment_skipped(&state);
             }
+            // One recursive handle per root, registered before the walk, covers
+            // every folder the walk is about to visit.
+            register_directory_watch(&mut watcher, root, &state, RecursiveMode::Recursive);
         }
         let mut batch = Vec::with_capacity(INSERT_BATCH_SIZE);
         for drive in &drives {
@@ -216,7 +219,6 @@ fn run_indexer(app: AppHandle, state: IndexState) {
                 scan_tree(
                     &app,
                     &state,
-                    &mut watcher,
                     &root,
                     epoch,
                     &mut batch,
@@ -237,7 +239,7 @@ fn run_indexer(app: AppHandle, state: IndexState) {
         // still land, and report the size the index already holds.
         let indexed = state.db.counts().map(|counts| counts.indexed_files).unwrap_or(0);
         for root in minimal_roots(state.roots()) {
-            register_directory_watch(&mut watcher, &root, &state);
+            register_directory_watch(&mut watcher, &root, &state, RecursiveMode::Recursive);
         }
         state.update(&app, |progress| progress.files_scanned = indexed);
     }
@@ -274,10 +276,11 @@ fn minimal_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     output
 }
 
+// The watcher is no longer threaded through here: the root is watched
+// recursively before the walk starts, so the walk itself registers nothing.
 fn scan_tree(
     app: &AppHandle,
     state: &IndexState,
-    watcher: &mut Option<RecommendedWatcher>,
     root: &Path,
     epoch: i64,
     batch: &mut Vec<FileRecord>,
@@ -305,7 +308,8 @@ fn scan_tree(
             state.record_skipped_folder(display, "Stored in the cloud, not on this PC");
             continue;
         }
-        register_directory_watch(watcher, &normalized, state);
+        // No per-directory watch here: the root this walk started from is already
+        // watched recursively, which covers everything underneath it.
         let iterator = match fs::read_dir(ops::io_path(&normalized)) {
             Ok(iterator) => iterator,
             Err(_) => {
@@ -395,7 +399,7 @@ fn apply_events(
         seen_paths.insert(record.path.clone());
         if metadata.is_dir() && !record.is_cloud {
             let mut batch = vec![record];
-            scan_tree(app, state, watcher, &path, epoch, &mut batch, seen_paths);
+            scan_tree(app, state, &path, epoch, &mut batch, seen_paths);
             if flush_batch(&state.db, &mut batch).is_err() { increment_skipped(state); }
         } else {
             if state.db.upsert(&record).is_err() { increment_skipped(state); }
@@ -407,12 +411,21 @@ fn apply_events(
     emit_current_progress(app, state);
 }
 
-fn register_directory_watch(watcher: &mut Option<RecommendedWatcher>, path: &Path, state: &IndexState) {
+/// Watch one place. Roots are watched recursively so a single handle covers the
+/// whole tree beneath them: watching every directory separately meant one OS
+/// handle per folder, and on a profile with fifty thousand of them that alone
+/// accounted for hundreds of megabytes of the running process.
+fn register_directory_watch(
+    watcher: &mut Option<RecommendedWatcher>,
+    path: &Path,
+    state: &IndexState,
+    mode: RecursiveMode,
+) {
     let Some(watcher) = watcher.as_mut() else { return; };
     let key = ops::display_path(path);
     let Ok(mut watched) = state.watched.lock() else { return; };
     if watched.contains(&key) { return; }
-    if watcher.watch(&ops::io_path(path), RecursiveMode::NonRecursive).is_ok() {
+    if watcher.watch(&ops::io_path(path), mode).is_ok() {
         watched.insert(key);
     } else {
         increment_skipped(state);
