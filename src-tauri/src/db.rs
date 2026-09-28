@@ -194,7 +194,19 @@ impl Database {
     }
 
     pub fn complete_scan(&self, epoch: i64) -> Result<(), AppError> {
-        self.lock()?.execute("DELETE FROM files WHERE last_seen <> ?1", [epoch])?;
+        let connection = self.lock()?;
+        connection.execute("DELETE FROM files WHERE last_seen <> ?1", [epoch])?;
+        // Every full rescan deletes the rows it did not see again, and SQLite keeps
+        // those pages on its free list instead of returning them to the filesystem.
+        // Left alone the file only ever grows: a profile indexed a handful of times
+        // reached 1.37 GB for an index that needs tens of megabytes. Reclaim only
+        // when a quarter of the file is waste, so a normal launch never pays for it.
+        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let free: i64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        if pages > 0 && free.saturating_mul(4) > pages {
+            // VACUUM rewrites the database, so it cannot run inside a transaction.
+            connection.execute_batch("VACUUM")?;
+        }
         Ok(())
     }
 

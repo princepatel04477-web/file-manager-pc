@@ -89,7 +89,7 @@ fn require_source(path: &str, roots: &[PathBuf]) -> Result<PathBuf, AppError> {
 /// touching the filesystem. The UI shows a conflict dialog from this result.
 #[tauri::command]
 #[specta::specta]
-pub fn plan_transfer(
+pub async fn plan_transfer(
     paths: Vec<String>,
     destination: String,
     kind: String,
@@ -172,7 +172,7 @@ fn run_transfer(
 
 #[tauri::command]
 #[specta::specta]
-pub fn copy_paths(
+pub async fn copy_paths(
     paths: Vec<String>,
     destination: String,
     decisions: Vec<ConflictDecision>,
@@ -202,7 +202,7 @@ pub fn copy_paths(
 
 #[tauri::command]
 #[specta::specta]
-pub fn move_paths(
+pub async fn move_paths(
     paths: Vec<String>,
     destination: String,
     decisions: Vec<ConflictDecision>,
@@ -232,7 +232,7 @@ pub fn move_paths(
 
 #[tauri::command]
 #[specta::specta]
-pub fn rename_path(path: String, new_name: String, replace: bool, state: State<'_, IndexState>) -> Result<RenameOutcome, String> {
+pub async fn rename_path(path: String, new_name: String, replace: bool, state: State<'_, IndexState>) -> Result<RenameOutcome, String> {
     let roots = state.roots().to_vec();
     let source = require_source(&path, &roots).map_err(|error| error.to_string())?;
     conflict::validate_name(&new_name).map_err(|_| AppError::InvalidName.to_string())?;
@@ -260,7 +260,7 @@ pub fn rename_path(path: String, new_name: String, replace: bool, state: State<'
 
 #[tauri::command]
 #[specta::specta]
-pub fn delete_paths(
+pub async fn delete_paths(
     paths: Vec<String>,
     app: AppHandle,
     state: State<'_, IndexState>,
@@ -290,19 +290,19 @@ pub fn delete_paths(
 
 #[tauri::command]
 #[specta::specta]
-pub fn cancel_operation(job_id: String, ops: State<'_, FileOpsState>) -> Result<bool, String> {
+pub async fn cancel_operation(job_id: String, ops: State<'_, FileOpsState>) -> Result<bool, String> {
     Ok(ops.registry().request_cancel(&job_id))
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_operations(ops: State<'_, FileOpsState>) -> Result<Vec<OperationProgress>, String> {
+pub async fn list_operations(ops: State<'_, FileOpsState>) -> Result<Vec<OperationProgress>, String> {
     Ok(ops.registry().active())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn reveal_in_explorer(path: String, state: State<'_, IndexState>) -> Result<(), String> {
+pub async fn reveal_in_explorer(path: String, state: State<'_, IndexState>) -> Result<(), String> {
     let roots = state.roots().to_vec();
     let target = require_source(&path, &roots).map_err(|error| error.to_string())?;
     shell::reveal(&target).map_err(|error| error.to_string())
@@ -310,7 +310,7 @@ pub fn reveal_in_explorer(path: String, state: State<'_, IndexState>) -> Result<
 
 #[tauri::command]
 #[specta::specta]
-pub fn open_with(path: String, state: State<'_, IndexState>) -> Result<(), String> {
+pub async fn open_with(path: String, state: State<'_, IndexState>) -> Result<(), String> {
     let roots = state.roots().to_vec();
     let target = require_source(&path, &roots).map_err(|error| error.to_string())?;
     shell::open_with(&target).map_err(|error| error.to_string())
@@ -318,7 +318,7 @@ pub fn open_with(path: String, state: State<'_, IndexState>) -> Result<(), Strin
 
 #[tauri::command]
 #[specta::specta]
-pub fn show_properties(path: String, state: State<'_, IndexState>) -> Result<(), String> {
+pub async fn show_properties(path: String, state: State<'_, IndexState>) -> Result<(), String> {
     let roots = state.roots().to_vec();
     let target = require_source(&path, &roots).map_err(|error| error.to_string())?;
     shell::properties(&target).map_err(|error| error.to_string())
