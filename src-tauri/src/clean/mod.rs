@@ -541,7 +541,7 @@ pub async fn empty_recycle_bin() -> Result<u64, String> {
 /// Launch an app's own uninstaller. Windows raises the elevation prompt if it needs one.
 #[tauri::command]
 #[specta::specta]
-pub fn uninstall_app(command: apps::UninstallCommand) -> Result<(), String> {
+pub async fn uninstall_app(command: apps::UninstallCommand) -> Result<(), String> {
     if command.executable.trim().is_empty() {
         return Err("This app has no uninstaller.".to_owned());
     }

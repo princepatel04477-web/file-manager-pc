@@ -204,10 +204,96 @@ pub fn is_excluded(path: &Path) -> bool {
             || name == "node_modules"
             || name == ".git"
             || name.starts_with("program files")
+            || TOOL_CACHE_DIRS.contains(&name.as_str())
     })
 }
+
+/// Directories that hold machine-generated state rather than anything a person
+/// put there. They are skipped by the index and by search.
+///
+/// `appdata` matters most: it is where Windows keeps per-application state, it is
+/// where Sift's own database lives, and on a developer's profile it dwarfs
+/// everything else. Indexing it meant a scan of the whole profile on every
+/// launch, a database several times larger than it needed to be, and Sift
+/// indexing its own index. The Clean tab still reaches inside it, because the
+/// junk scanner walks its own explicit targets and does not consult this list —
+/// `%TEMP%` and the browser caches are cleaned exactly as before. Browsing into
+/// one of these folders in Explorer still works; they simply are not indexed.
+const TOOL_CACHE_DIRS: [&str; 20] = [
+    "appdata",
+    ".cache",
+    ".cargo",
+    ".rustup",
+    ".gradle",
+    ".m2",
+    ".nuget",
+    ".npm",
+    "npm-cache",
+    ".bun",
+    ".deno",
+    ".pub-cache",
+    ".conda",
+    ".ollama",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+];
 
 pub fn is_hidden(path: &Path, metadata: &fs::Metadata) -> bool {
     attributes(metadata) & FILE_ATTRIBUTE_HIDDEN != 0
         || path.file_name().map(|name| name.to_string_lossy().starts_with('.')).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_generated_directories_stay_out_of_the_index() {
+        for path in [
+            r"C:\Users\me\AppData\Local\Temp\x.tmp",
+            r"C:\Users\me\AppData\Roaming\app\state.json",
+            r"C:\Users\me\.cargo\registry\src\crate\lib.rs",
+            r"C:\Users\me\.gradle\caches\modules\a.jar",
+            r"C:\Users\me\.rustup\toolchains\stable\bin\rustc.exe",
+            r"C:\Users\me\project\node_modules\pkg\index.js",
+            r"C:\Users\me\project\.venv\Lib\site-packages\x.py",
+            r"C:\Users\me\project\__pycache__\mod.pyc",
+        ] {
+            assert!(is_excluded(Path::new(path)), "{path} should be skipped");
+        }
+    }
+
+    #[test]
+    fn the_folders_people_actually_keep_things_in_are_indexed() {
+        for path in [
+            r"C:\Users\me\Documents\report.pdf",
+            r"C:\Users\me\Downloads\installer.exe",
+            r"C:\Users\me\Pictures\Screenshots\shot.png",
+            r"C:\Users\me\Desktop\notes.txt",
+            r"C:\Users\me\Projects\app\src\main.rs",
+        ] {
+            assert!(!is_excluded(Path::new(path)), "{path} should be indexed");
+        }
+    }
+
+    #[test]
+    fn exclusions_match_whole_components_not_substrings() {
+        // A file or folder whose name merely contains an excluded word is content.
+        assert!(!is_excluded(Path::new(r"C:\Users\me\Documents\appdata.txt")));
+        assert!(!is_excluded(Path::new(r"C:\Users\me\Documents\my-appdata-notes")));
+        assert!(!is_excluded(Path::new(r"C:\Users\me\Documents\venv-tutorial.md")));
+        assert!(is_excluded(Path::new(r"C:\Users\me\venv\pyvenv.cfg")));
+    }
+
+    #[test]
+    fn windows_temp_is_still_reachable_for_the_junk_card() {
+        // The Clean tab's junk scanner walks its own targets, but this boundary is
+        // the one that used to let Windows Temp through and must keep doing so.
+        assert!(!is_excluded(Path::new(r"C:\Windows\Temp\old.log")));
+        assert!(is_excluded(Path::new(r"C:\Windows\System32\kernel32.dll")));
+    }
 }

@@ -666,7 +666,7 @@ async fn start_share(path: String, state: tauri::State<'_, ShareState>) -> Resul
 
 #[tauri::command]
 #[specta::specta]
-fn stop_share(state: tauri::State<'_, ShareState>) -> Result<(), String> {
+async fn stop_share(state: tauri::State<'_, ShareState>) -> Result<(), String> {
     let mut active = state.active.lock().map_err(|_| "Sharing could not be stopped.".to_owned())?;
     if let Some(session) = active.take() {
         let _ = session.stop.send(());
@@ -859,7 +859,7 @@ async fn start_pc_share(path: String, state: tauri::State<'_, PcShareState>) -> 
 
 #[tauri::command]
 #[specta::specta]
-fn stop_pc_share(state: tauri::State<'_, PcShareState>) -> Result<(), String> {
+async fn stop_pc_share(state: tauri::State<'_, PcShareState>) -> Result<(), String> {
     let mut active = state.active.lock().map_err(|_| "Nearby sharing could not be stopped.".to_owned())?;
     if let Some(session) = active.take() {
         let _ = session.stop.send(());
@@ -871,7 +871,7 @@ fn stop_pc_share(state: tauri::State<'_, PcShareState>) -> Result<(), String> {
 
 #[tauri::command]
 #[specta::specta]
-fn get_pc_share_progress(state: tauri::State<'_, PcShareState>) -> Result<Option<u64>, String> {
+async fn get_pc_share_progress(state: tauri::State<'_, PcShareState>) -> Result<Option<u64>, String> {
     let mut active = state.active.lock().map_err(|_| "Sharing status is unavailable.".to_owned())?;
     if active.as_ref().is_some_and(|session| std::time::Instant::now() >= session.expires_at) {
         if let Some(session) = active.take() {
@@ -886,7 +886,7 @@ fn get_pc_share_progress(state: tauri::State<'_, PcShareState>) -> Result<Option
 
 #[tauri::command]
 #[specta::specta]
-fn discover_pc_shares() -> Result<Vec<NearbyShare>, String> {
+async fn discover_pc_shares() -> Result<Vec<NearbyShare>, String> {
     use mdns_sd::ServiceEvent;
     let daemon = mdns_sd::ServiceDaemon::new().map_err(|_| "Nearby discovery could not start. Check that multicast is available on this network.".to_owned())?;
     let receiver = daemon.browse(share::pc::SERVICE_TYPE).map_err(|_| "Nearby discovery could not start.".to_owned())?;
@@ -916,19 +916,22 @@ fn discover_pc_shares() -> Result<Vec<NearbyShare>, String> {
 
 #[tauri::command]
 #[specta::specta]
-fn get_settings(state: tauri::State<'_, IndexState>) -> Settings {
-    settings::load(&state.db)
+// Returns a Result purely so it can be async: a borrowed `State` in an async
+// command requires one. The frontend already awaits a promise here, so nothing
+// changes on that side.
+async fn get_settings(state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+    Ok(settings::load(&state.db))
 }
 
 #[tauri::command]
 #[specta::specta]
-fn set_theme(theme: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+async fn set_theme(theme: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
     settings::set_theme(&state.db, &theme)
 }
 
 #[tauri::command]
 #[specta::specta]
-fn set_scan_schedule(schedule: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+async fn set_scan_schedule(schedule: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
     settings::set_scan_schedule(&state.db, &schedule)
 }
 
@@ -936,41 +939,41 @@ fn set_scan_schedule(schedule: String, state: tauri::State<'_, IndexState>) -> R
 /// Windows actually ended up with. A refused write is an error, not a silent no.
 #[tauri::command]
 #[specta::specta]
-fn set_start_with_windows(enabled: bool) -> Result<bool, String> {
+async fn set_start_with_windows(enabled: bool) -> Result<bool, String> {
     settings::set_start_with_windows(enabled)?;
     Ok(settings::start_with_windows())
 }
 
 #[tauri::command]
 #[specta::specta]
-fn add_exclusion(path: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+async fn add_exclusion(path: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
     settings::add_exclusion(&state, &path)
 }
 
 #[tauri::command]
 #[specta::specta]
-fn remove_exclusion(path: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
+async fn remove_exclusion(path: String, state: tauri::State<'_, IndexState>) -> Result<Settings, String> {
     settings::remove_exclusion(&state, &path)
 }
 
 #[tauri::command]
 #[specta::specta]
-fn get_cache_report(state: tauri::State<'_, IndexState>) -> CacheReport {
-    settings::cache_report(&state)
+async fn get_cache_report(state: tauri::State<'_, IndexState>) -> Result<CacheReport, String> {
+    Ok(settings::cache_report(&state))
 }
 
 #[tauri::command]
 #[specta::specta]
-fn clear_thumbnail_cache(state: tauri::State<'_, IndexState>) -> Result<CacheReport, String> {
+async fn clear_thumbnail_cache(state: tauri::State<'_, IndexState>) -> Result<CacheReport, String> {
     settings::clear_thumbnail_cache()?;
     Ok(settings::cache_report(&state))
 }
 
 #[tauri::command]
 #[specta::specta]
-fn clear_skipped_folders(state: tauri::State<'_, IndexState>) -> CacheReport {
+async fn clear_skipped_folders(state: tauri::State<'_, IndexState>) -> Result<CacheReport, String> {
     state.clear_skipped_folders();
-    settings::cache_report(&state)
+    Ok(settings::cache_report(&state))
 }
 
 fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
@@ -1042,6 +1045,18 @@ fn configure_specta() -> tauri_specta::Builder<tauri::Wry> {
 pub fn run() {
     let specta = configure_specta();
     tauri::Builder::default()
+        // Registered first, as this plugin requires. Without it every launch
+        // started another full indexer against the same SQLite file: opening Sift
+        // a second time because the first looked slow made it slower still, and
+        // two scans contending for one write lock is what a stalled window looks
+        // like from the outside. A second launch now raises the first window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(ShareState::default())
         .manage(PcShareState::default())
         .manage(FileOpsState::default())

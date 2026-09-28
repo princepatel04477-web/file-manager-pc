@@ -30,13 +30,13 @@ pub fn get_index_status(state: State<'_, IndexState>) -> Result<IndexProgress, S
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_category_summary(state: State<'_, IndexState>) -> Result<Vec<CategorySummary>, String> {
+pub async fn get_category_summary(state: State<'_, IndexState>) -> Result<Vec<CategorySummary>, String> {
     state.db.categories().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn get_drive_storage(state: State<'_, IndexState>) -> Result<Vec<DriveStorage>, String> {
+pub async fn get_drive_storage(state: State<'_, IndexState>) -> Result<Vec<DriveStorage>, String> {
     let supported = indexer::discover_fixed_and_removable_drives()
         .into_iter()
         .map(|drive| (drive.label.to_ascii_lowercase(), ops::display_path(&drive.path)))
@@ -69,7 +69,7 @@ pub fn get_drive_storage(state: State<'_, IndexState>) -> Result<Vec<DriveStorag
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_index_directory(
+pub async fn list_index_directory(
     path: String,
     sort: String,
     descending: bool,
@@ -88,7 +88,7 @@ pub fn list_index_directory(
 
 #[tauri::command]
 #[specta::specta]
-pub fn search_index(filter: SearchFilter, state: State<'_, IndexState>) -> Result<Vec<IndexedEntry>, String> {
+pub async fn search_index(filter: SearchFilter, state: State<'_, IndexState>) -> Result<Vec<IndexedEntry>, String> {
     if filter.min_size.zip(filter.max_size).is_some_and(|(min, max)| min > max) {
         return Err(AppError::InvalidRequest.to_string());
     }
@@ -192,7 +192,7 @@ fn kind_label(path: &Path, metadata: &fs::Metadata) -> String {
 
 #[tauri::command]
 #[specta::specta]
-pub fn describe_path(path: String, state: State<'_, IndexState>) -> Result<FileProperties, String> {
+pub async fn describe_path(path: String, state: State<'_, IndexState>) -> Result<FileProperties, String> {
     let roots = state.roots().to_vec();
     let target = ops::normal_path(&PathBuf::from(&path));
     let metadata = ops::validate_path(&target, &roots).map_err(|error| error.to_string())?;
@@ -230,7 +230,7 @@ pub fn describe_path(path: String, state: State<'_, IndexState>) -> Result<FileP
 
 #[tauri::command]
 #[specta::specta]
-pub fn read_text_preview(path: String, state: State<'_, IndexState>) -> Result<TextPreview, String> {
+pub async fn read_text_preview(path: String, state: State<'_, IndexState>) -> Result<TextPreview, String> {
     let roots = state.roots().to_vec();
     let target = ops::normal_path(&PathBuf::from(&path));
     let metadata = ops::validate_path(&target, &roots).map_err(|error| error.to_string())?;
@@ -264,13 +264,13 @@ pub fn read_text_preview(path: String, state: State<'_, IndexState>) -> Result<T
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_favorites(state: State<'_, IndexState>) -> Result<Vec<FavoriteItem>, String> {
+pub async fn list_favorites(state: State<'_, IndexState>) -> Result<Vec<FavoriteItem>, String> {
     state.db.favorites().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn add_favorite(path: String, name: String, is_directory: bool, state: State<'_, IndexState>) -> Result<Vec<FavoriteItem>, String> {
+pub async fn add_favorite(path: String, name: String, is_directory: bool, state: State<'_, IndexState>) -> Result<Vec<FavoriteItem>, String> {
     let roots = state.roots().to_vec();
     let target = ops::normal_path(&PathBuf::from(&path));
     if ops::root_for(&target, &roots).is_none() {
@@ -287,7 +287,7 @@ pub fn add_favorite(path: String, name: String, is_directory: bool, state: State
 
 #[tauri::command]
 #[specta::specta]
-pub fn remove_favorite(path: String, state: State<'_, IndexState>) -> Result<Vec<FavoriteItem>, String> {
+pub async fn remove_favorite(path: String, state: State<'_, IndexState>) -> Result<Vec<FavoriteItem>, String> {
     let display = ops::display_path(&ops::normal_path(&PathBuf::from(&path)));
     state.db.remove_favorite(&display).map_err(|error| error.to_string())?;
     state.db.favorites().map_err(|error| error.to_string())
@@ -295,13 +295,13 @@ pub fn remove_favorite(path: String, state: State<'_, IndexState>) -> Result<Vec
 
 #[tauri::command]
 #[specta::specta]
-pub fn list_recents(limit: u32, state: State<'_, IndexState>) -> Result<Vec<RecentItem>, String> {
+pub async fn list_recents(limit: u32, state: State<'_, IndexState>) -> Result<Vec<RecentItem>, String> {
     state.db.recents(limit).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn clear_recents(state: State<'_, IndexState>) -> Result<(), String> {
+pub async fn clear_recents(state: State<'_, IndexState>) -> Result<(), String> {
     state.db.clear_recents().map_err(|error| error.to_string())
 }
 
@@ -316,7 +316,7 @@ pub fn note_recent(state: &IndexState, path: &Path, name: &str) {
 /// Recents entry point for the webview (used when a file is previewed inside Sift).
 #[tauri::command]
 #[specta::specta]
-pub fn record_recent(path: String, name: String, state: State<'_, IndexState>) -> Result<(), String> {
+pub async fn record_recent(path: String, name: String, state: State<'_, IndexState>) -> Result<(), String> {
     let roots = state.roots().to_vec();
     let target = ops::normal_path(&PathBuf::from(&path));
     if ops::root_for(&target, &roots).is_none() {
