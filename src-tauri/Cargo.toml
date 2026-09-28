@@ -1,6 +1,6 @@
 [package]
 name = "sift"
-version = "0.1.0"
+version = "0.1.1"
 description = "A private, thoughtful file manager for Windows"
 authors = ["Sift"]
 edition = "2021"
